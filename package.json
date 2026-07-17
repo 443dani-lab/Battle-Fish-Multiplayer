@@ -1,0 +1,20 @@
+{
+  "name": "battle-fish-multiplayer",
+  "version": "1.0.0",
+  "description": "Battle Fish — minimal authoritative multiplayer server (Colyseus)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@colyseus/schema": "3.0.76",
+    "@colyseus/tools": "^0.16.20",
+    "@colyseus/ws-transport": "0.16.5",
+    "colyseus": "0.16.5",
+    "colyseus.js": "0.16.22",
+    "express": "^4.21.2"
+  }
+}

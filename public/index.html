@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Battle Fish — Multiplayer Test</title>
+<style>
+  body { margin:0; background:#02101e; color:#cfe9ff; font-family:system-ui,sans-serif; overflow:hidden; }
+  #hud { position:fixed; top:10px; left:10px; font-size:13px; background:rgba(0,0,0,.45); padding:6px 12px; border-radius:8px; }
+  canvas { display:block; margin:0 auto; background:#03192e; }
+</style>
+</head>
+<body>
+<div id="hud">connecting…</div>
+<canvas id="c" width="800" height="600"></canvas>
+
+<!-- Colyseus client SDK (bundled locally so it works offline) -->
+<script src="/lib/colyseus.js"></script>
+<script>
+  const canvas = document.getElementById('c'), ctx = canvas.getContext('2d'), hud = document.getElementById('hud');
+
+  // ── SERVER ADDRESS ──────────────────────────────────────────────
+  // Empty = connect to the same host that served this page (local testing).
+  // For production, put your deployed server here, e.g. "wss://xxxxx.colyseus.cloud"
+  const SERVER_URL = "";
+  const endpoint = SERVER_URL || ((location.protocol === "https:" ? "wss://" : "ws://") + location.host);
+  // ────────────────────────────────────────────────────────────────
+
+  const client = new Colyseus.Client(endpoint);
+  let room = null;
+
+  (async () => {
+    try {
+      room = await client.joinOrCreate("battle", { name: "Fish " + Math.floor(Math.random() * 1000) });
+      canvas.addEventListener("mousemove", (e) => {
+        const r = canvas.getBoundingClientRect();
+        const x = (e.clientX - r.left) * (canvas.width / r.width);
+        const y = (e.clientY - r.top) * (canvas.height / r.height);
+        room.send("move", { x, y });   // tell the server where we want to be; it decides
+      });
+      requestAnimationFrame(draw);
+    } catch (e) {
+      hud.textContent = "connection failed: " + e.message;
+    }
+  })();
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    let n = 0;
+    if (room && room.state && room.state.players) {
+      room.state.players.forEach((p, id) => {
+        n++;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 16, 0, Math.PI * 2);
+        ctx.fillStyle = p.color || "#4cf";
+        ctx.fill();
+        if (id === room.sessionId) { ctx.lineWidth = 3; ctx.strokeStyle = "#fff"; ctx.stroke(); }
+        ctx.fillStyle = "#cfe9ff"; ctx.font = "12px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText(p.name || "Fish", p.x, p.y - 24);
+      });
+    }
+    hud.textContent = room ? (n + " fish in the sea — move your mouse (you're the ringed one)") : "connecting…";
+    requestAnimationFrame(draw);
+  }
+</script>
+</body>
+</html>
