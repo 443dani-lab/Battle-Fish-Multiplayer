@@ -8,46 +8,67 @@
   html,body{margin:0;height:100%;background:#02101e;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}
   #title{position:fixed;top:8px;left:50%;transform:translateX(-50%);color:#7feaff;font-size:14px;font-weight:800;letter-spacing:3px;text-shadow:0 0 12px rgba(127,234,255,.5);pointer-events:none}
   #hud{position:fixed;top:8px;left:8px;color:#7feaff;font-size:13px;background:rgba(2,16,30,.55);padding:5px 10px;border-radius:8px;pointer-events:none}
+  #feed{position:fixed;top:40px;left:8px;color:#bfe0f2;font-size:11px;line-height:1.6;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,.6)}
   #board{position:fixed;top:8px;right:8px;color:#cfe9ff;font-size:12px;line-height:1.55;background:rgba(2,16,30,.55);padding:7px 12px;border-radius:8px;min-width:130px;pointer-events:none;border:1px solid rgba(127,234,255,.25)}
   #board b{color:#7feaff;letter-spacing:1px}
+  #toast{position:fixed;top:38%;left:50%;transform:translate(-50%,-50%);color:#ffd9d9;font-size:20px;font-weight:800;letter-spacing:1px;background:rgba(40,4,10,.72);border:1px solid rgba(255,120,120,.5);padding:14px 26px;border-radius:14px;display:none;pointer-events:none;text-align:center}
   canvas{display:block;touch-action:none}
 </style>
 </head>
 <body>
 <div id="title">BATTLE FISH — ARENA</div>
 <div id="hud">connecting…</div>
+<div id="feed"></div>
 <div id="board"></div>
+<div id="toast"></div>
 <canvas id="c"></canvas>
 <script src="/lib/colyseus.js"></script>
 <script>
   var WORLD = 1600;
   var canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
   var hud = document.getElementById('hud'), board = document.getElementById('board');
+  var feedEl = document.getElementById('feed'), toastEl = document.getElementById('toast');
   var bgGrad = null;
   function resize(){ canvas.width = window.innerWidth; canvas.height = window.innerHeight; bgGrad = null; }
   resize(); window.addEventListener('resize', resize);
 
-  var SERVER_URL = "";  // empty = same host that served this page
+  var SERVER_URL = "";
   var endpoint = SERVER_URL || ((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
   var client = new Colyseus.Client(endpoint);
   var room = null;
 
   var target = { x: WORLD/2, y: WORLD/2 };
-  var myPos = null;          // client-side PREDICTED position (instant response)
-  var myLastSize = null;     // to detect being eaten -> snap to respawn
-  var renderFish = {};       // sessionId -> smoothed {x,y,size,ang,phase,px,py}
+  var myPos = null, myLastSize = null;
+  var renderFish = {};
+  var feedLines = [], toastTimer = null;
 
-  // ambient bubbles (in world space so they parallax with the camera)
+  var qName = null;
+  try { qName = new URLSearchParams(location.search).get('name'); } catch (e) {}
+  var myName = (qName || ('Fish ' + Math.floor(Math.random()*1000))).slice(0, 16);
+
   var bubbles = [];
   for (var i = 0; i < 45; i++) bubbles.push({ x: Math.random()*WORLD, y: Math.random()*WORLD, r: 1.5 + Math.random()*4, s: 8 + Math.random()*22 });
 
   (async function(){
     try {
-      room = await client.joinOrCreate('battle', { name: 'Fish ' + Math.floor(Math.random()*1000) });
-      hud.textContent = 'move your mouse — eat smaller fish';
+      room = await client.joinOrCreate('battle', { name: myName });
+      hud.textContent = 'move your mouse — eat pellets and smaller fish';
+      room.onMessage('eat', function (m) {
+        feedLines.unshift(m.eaterName + ' ate ' + m.victimName);
+        if (feedLines.length > 4) feedLines.pop();
+        feedEl.innerHTML = feedLines.join('<br>');
+        if (room && m.victim === room.sessionId) showToast('Eaten by ' + m.eaterName + '!<br><span style="font-size:12px;font-weight:600;color:#f6bcbc">respawning…</span>');
+      });
       requestAnimationFrame(draw);
     } catch (e) { hud.textContent = 'connection failed: ' + e.message; }
   })();
+
+  function showToast(html){
+    toastEl.innerHTML = html;
+    toastEl.style.display = 'block';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ toastEl.style.display = 'none'; }, 2200);
+  }
 
   function myServerFish(){
     return (room && room.state && room.state.players) ? room.state.players.get(room.sessionId) : null;
@@ -62,7 +83,6 @@
   canvas.addEventListener('mousemove', function(e){ setTarget(e.clientX, e.clientY); });
   canvas.addEventListener('touchmove', function(e){ e.preventDefault(); var t = e.touches[0]; setTarget(t.clientX, t.clientY); }, {passive:false});
 
-  // report our predicted position to the server 20x/sec (server clamps it and owns all eating)
   setInterval(function(){
     if (room && myPos) room.send('move', { x: myPos.x, y: myPos.y });
   }, 50);
@@ -70,29 +90,24 @@
   function drawFishShape(g, size, ang, color, isMe, now, phase){
     g.rotate(ang);
     var wag = Math.sin(now*0.012 + phase) * size * 0.28;
-    // tail
     g.beginPath();
     g.moveTo(-size*0.7, 0);
     g.lineTo(-size*1.4, -size*0.5 + wag);
     g.lineTo(-size*1.4,  size*0.5 + wag);
     g.closePath();
     g.globalAlpha = 0.85; g.fillStyle = color; g.fill(); g.globalAlpha = 1;
-    // dorsal fin
     g.beginPath();
     g.moveTo(-size*0.15, -size*0.5);
     g.lineTo(size*0.22, -size*0.95);
     g.lineTo(size*0.45, -size*0.45);
     g.closePath();
     g.globalAlpha = 0.9; g.fillStyle = color; g.fill(); g.globalAlpha = 1;
-    // body
     g.beginPath();
     g.ellipse(0, 0, size, size*0.62, 0, 0, Math.PI*2);
     g.fillStyle = color; g.fill();
-    // belly highlight
     g.beginPath();
     g.ellipse(size*0.05, size*0.2, size*0.78, size*0.34, 0, 0, Math.PI*2);
     g.fillStyle = 'rgba(255,255,255,0.13)'; g.fill();
-    // eye
     g.beginPath(); g.arc(size*0.52, -size*0.16, Math.max(2, size*0.14), 0, Math.PI*2);
     g.fillStyle = '#eaf7ff'; g.fill();
     g.beginPath(); g.arc(size*0.57, -size*0.16, Math.max(1, size*0.07), 0, Math.PI*2);
@@ -105,7 +120,7 @@
 
   var last = performance.now();
   function draw(){
-    requestAnimationFrame(draw);           // scheduled first: nothing can kill the loop
+    requestAnimationFrame(draw);
     var now = performance.now();
     var dt = Math.min(0.05, (now - last) / 1000); last = now;
 
@@ -121,11 +136,10 @@
     var sm = myServerFish();
     if (sm){
       if (!myPos) myPos = { x: sm.x, y: sm.y };
-      if (myLastSize !== null && sm.size < myLastSize - 4){ myPos.x = sm.x; myPos.y = sm.y; }  // eaten -> respawn
+      if (myLastSize !== null && sm.size < myLastSize - 4){ myPos.x = sm.x; myPos.y = sm.y; }
       myLastSize = sm.size;
       var ex = sm.x - myPos.x, ey = sm.y - myPos.y;
       if (ex*ex + ey*ey > 250*250){ myPos.x = sm.x; myPos.y = sm.y; }
-      // PREDICTION: move locally toward the cursor every frame — instant response
       var dx = target.x - myPos.x, dy = target.y - myPos.y;
       var d = Math.sqrt(dx*dx + dy*dy);
       if (d > 1){
@@ -140,7 +154,6 @@
     var camX = myPos ? myPos.x : WORLD/2, camY = myPos ? myPos.y : WORLD/2;
     var ox = canvas.width/2 - camX, oy = canvas.height/2 - camY;
 
-    // faint grid for motion reference
     ctx.strokeStyle = 'rgba(127,234,255,0.05)'; ctx.lineWidth = 1;
     for (var gx = 0; gx <= WORLD; gx += 200){
       var sx0 = gx + ox; if (sx0 < -2 || sx0 > canvas.width + 2) continue;
@@ -151,7 +164,6 @@
       ctx.beginPath(); ctx.moveTo(Math.max(0, ox), sy0); ctx.lineTo(Math.min(canvas.width, ox + WORLD), sy0); ctx.stroke();
     }
 
-    // bubbles drifting up
     ctx.fillStyle = 'rgba(255,255,255,0.10)';
     for (var bi = 0; bi < bubbles.length; bi++){
       var b = bubbles[bi];
@@ -163,11 +175,21 @@
       }
     }
 
-    // glowing arena border
+    // food pellets — glowing dots
+    if (room.state.pellets){
+      room.state.pellets.forEach(function(pe){
+        var px = pe.x + ox, py = pe.y + oy;
+        if (px < -10 || px > canvas.width + 10 || py < -10 || py > canvas.height + 10) return;
+        ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI*2);
+        ctx.fillStyle = 'rgba(127,234,255,0.25)'; ctx.fill();
+        ctx.beginPath(); ctx.arc(px, py, 2.6, 0, Math.PI*2);
+        ctx.fillStyle = '#aef3ff'; ctx.fill();
+      });
+    }
+
     ctx.strokeStyle = 'rgba(127,234,255,0.16)'; ctx.lineWidth = 10; ctx.strokeRect(ox, oy, WORLD, WORLD);
     ctx.strokeStyle = 'rgba(127,234,255,0.7)';  ctx.lineWidth = 2.5; ctx.strokeRect(ox, oy, WORLD, WORLD);
 
-    // INTERPOLATION: glide every fish toward its latest server position
     var seen = {}, list = [];
     room.state.players.forEach(function(p, id){
       seen[id] = true;
@@ -186,6 +208,10 @@
     });
     for (var gone in renderFish){ if (!seen[gone]) delete renderFish[gone]; }
 
+    // leaderboard + crown holder
+    var ranked = list.slice().sort(function(a, b3){ return b3[1].score - a[1].score; });
+    var topId = (ranked.length && ranked[0][1].score > 0) ? ranked[0][0] : null;
+
     list.sort(function(a, b2){ return a[2].size - b2[2].size; });
     list.forEach(function(t3){
       var id = t3[0], p = t3[1], r = t3[2];
@@ -197,13 +223,24 @@
       ctx.restore();
       ctx.fillStyle = '#dff3ff'; ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'center';
       ctx.fillText(p.name, sx, sy - r.size - 10);
+      if (id === topId){ ctx.font = '16px system-ui, sans-serif'; ctx.fillText('👑', sx, sy - r.size - 26); }
     });
 
-    var ranked = list.map(function(pr){ return pr[1]; }).sort(function(a, b3){ return b3.score - a.score; }).slice(0, 5);
+    // minimap (bottom-right)
+    var MM = 140, mmX = canvas.width - MM - 12, mmY = canvas.height - MM - 12, sc = MM / WORLD;
+    ctx.fillStyle = 'rgba(2,16,30,0.55)'; ctx.fillRect(mmX, mmY, MM, MM);
+    ctx.strokeStyle = 'rgba(127,234,255,0.4)'; ctx.lineWidth = 1; ctx.strokeRect(mmX, mmY, MM, MM);
+    list.forEach(function(t4){
+      var id = t4[0], p = t4[1];
+      ctx.beginPath(); ctx.arc(mmX + p.x*sc, mmY + p.y*sc, id === room.sessionId ? 3.5 : 2.2, 0, Math.PI*2);
+      ctx.fillStyle = p.color; ctx.fill();
+      if (id === room.sessionId){ ctx.lineWidth = 1.2; ctx.strokeStyle = '#fff'; ctx.stroke(); }
+    });
+
     var html = '<b>LEADERBOARD</b><br>';
-    ranked.forEach(function(p){ html += p.name + ': ' + p.score + '<br>'; });
+    ranked.slice(0, 5).forEach(function(pr){ html += pr[1].name + ': ' + pr[1].score + '<br>'; });
     board.innerHTML = html;
-    hud.textContent = list.length + ' fish in the arena — eat smaller ones';
+    hud.textContent = list.length + ' fish · eat pellets and smaller fish';
   }
 </script>
 </body>
