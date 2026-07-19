@@ -6,13 +6,15 @@
 <title>Battle Fish — Arena</title>
 <style>
   html,body{margin:0;height:100%;background:#02101e;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}
-  #hud{position:fixed;top:8px;left:8px;color:#7feaff;font-size:13px;background:rgba(0,0,0,.42);padding:5px 10px;border-radius:8px;pointer-events:none}
-  #board{position:fixed;top:8px;right:8px;color:#cfe9ff;font-size:12px;line-height:1.5;background:rgba(0,0,0,.42);padding:6px 12px;border-radius:8px;min-width:120px;pointer-events:none}
-  #board b{color:#7feaff}
-  canvas{display:block;background:#04203a;touch-action:none}
+  #title{position:fixed;top:8px;left:50%;transform:translateX(-50%);color:#7feaff;font-size:14px;font-weight:800;letter-spacing:3px;text-shadow:0 0 12px rgba(127,234,255,.5);pointer-events:none}
+  #hud{position:fixed;top:8px;left:8px;color:#7feaff;font-size:13px;background:rgba(2,16,30,.55);padding:5px 10px;border-radius:8px;pointer-events:none}
+  #board{position:fixed;top:8px;right:8px;color:#cfe9ff;font-size:12px;line-height:1.55;background:rgba(2,16,30,.55);padding:7px 12px;border-radius:8px;min-width:130px;pointer-events:none;border:1px solid rgba(127,234,255,.25)}
+  #board b{color:#7feaff;letter-spacing:1px}
+  canvas{display:block;touch-action:none}
 </style>
 </head>
 <body>
+<div id="title">BATTLE FISH — ARENA</div>
 <div id="hud">connecting…</div>
 <div id="board"></div>
 <canvas id="c"></canvas>
@@ -21,7 +23,8 @@
   var WORLD = 1600;
   var canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
   var hud = document.getElementById('hud'), board = document.getElementById('board');
-  function resize(){ canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+  var bgGrad = null;
+  function resize(){ canvas.width = window.innerWidth; canvas.height = window.innerHeight; bgGrad = null; }
   resize(); window.addEventListener('resize', resize);
 
   var SERVER_URL = "";  // empty = same host that served this page
@@ -31,8 +34,12 @@
 
   var target = { x: WORLD/2, y: WORLD/2 };
   var myPos = null;          // client-side PREDICTED position (instant response)
-  var myLastSize = null;     // to detect being eaten (size reset) -> snap to respawn
-  var renderFish = {};       // sessionId -> smoothed {x,y,size} for drawing
+  var myLastSize = null;     // to detect being eaten -> snap to respawn
+  var renderFish = {};       // sessionId -> smoothed {x,y,size,ang,phase,px,py}
+
+  // ambient bubbles (in world space so they parallax with the camera)
+  var bubbles = [];
+  for (var i = 0; i < 45; i++) bubbles.push({ x: Math.random()*WORLD, y: Math.random()*WORLD, r: 1.5 + Math.random()*4, s: 8 + Math.random()*22 });
 
   (async function(){
     try {
@@ -60,29 +67,69 @@
     if (room && myPos) room.send('move', { x: myPos.x, y: myPos.y });
   }, 50);
 
+  function drawFishShape(g, size, ang, color, isMe, now, phase){
+    g.rotate(ang);
+    var wag = Math.sin(now*0.012 + phase) * size * 0.28;
+    // tail
+    g.beginPath();
+    g.moveTo(-size*0.7, 0);
+    g.lineTo(-size*1.4, -size*0.5 + wag);
+    g.lineTo(-size*1.4,  size*0.5 + wag);
+    g.closePath();
+    g.globalAlpha = 0.85; g.fillStyle = color; g.fill(); g.globalAlpha = 1;
+    // dorsal fin
+    g.beginPath();
+    g.moveTo(-size*0.15, -size*0.5);
+    g.lineTo(size*0.22, -size*0.95);
+    g.lineTo(size*0.45, -size*0.45);
+    g.closePath();
+    g.globalAlpha = 0.9; g.fillStyle = color; g.fill(); g.globalAlpha = 1;
+    // body
+    g.beginPath();
+    g.ellipse(0, 0, size, size*0.62, 0, 0, Math.PI*2);
+    g.fillStyle = color; g.fill();
+    // belly highlight
+    g.beginPath();
+    g.ellipse(size*0.05, size*0.2, size*0.78, size*0.34, 0, 0, Math.PI*2);
+    g.fillStyle = 'rgba(255,255,255,0.13)'; g.fill();
+    // eye
+    g.beginPath(); g.arc(size*0.52, -size*0.16, Math.max(2, size*0.14), 0, Math.PI*2);
+    g.fillStyle = '#eaf7ff'; g.fill();
+    g.beginPath(); g.arc(size*0.57, -size*0.16, Math.max(1, size*0.07), 0, Math.PI*2);
+    g.fillStyle = '#0b1c2a'; g.fill();
+    if (isMe){
+      g.beginPath(); g.ellipse(0, 0, size + 3, size*0.62 + 3, 0, 0, Math.PI*2);
+      g.lineWidth = 2.5; g.strokeStyle = 'rgba(255,255,255,0.9)'; g.stroke();
+    }
+  }
+
   var last = performance.now();
   function draw(){
     requestAnimationFrame(draw);           // scheduled first: nothing can kill the loop
     var now = performance.now();
     var dt = Math.min(0.05, (now - last) / 1000); last = now;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (!bgGrad){
+      bgGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      bgGrad.addColorStop(0, '#0b3552');
+      bgGrad.addColorStop(1, '#02101e');
+    }
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     if (!(room && room.state && room.state.players)) return;
 
     var sm = myServerFish();
     if (sm){
       if (!myPos) myPos = { x: sm.x, y: sm.y };
-      // got eaten? (server reset our size) -> snap to the respawn point
-      if (myLastSize !== null && sm.size < myLastSize - 4){ myPos.x = sm.x; myPos.y = sm.y; }
+      if (myLastSize !== null && sm.size < myLastSize - 4){ myPos.x = sm.x; myPos.y = sm.y; }  // eaten -> respawn
       myLastSize = sm.size;
-      // if server and prediction ever diverge badly, trust the server
       var ex = sm.x - myPos.x, ey = sm.y - myPos.y;
       if (ex*ex + ey*ey > 250*250){ myPos.x = sm.x; myPos.y = sm.y; }
-
       // PREDICTION: move locally toward the cursor every frame — instant response
       var dx = target.x - myPos.x, dy = target.y - myPos.y;
       var d = Math.sqrt(dx*dx + dy*dy);
       if (d > 1){
-        var pps = 20 * Math.max(3, 11 - sm.size * 0.03);   // same speed as before, per second
+        var pps = 20 * Math.max(3, 11 - sm.size * 0.03);
         var step = Math.min(pps * dt, d);
         myPos.x += dx/d * step; myPos.y += dy/d * step;
       }
@@ -93,38 +140,67 @@
     var camX = myPos ? myPos.x : WORLD/2, camY = myPos ? myPos.y : WORLD/2;
     var ox = canvas.width/2 - camX, oy = canvas.height/2 - camY;
 
-    ctx.strokeStyle = '#0a4d68'; ctx.lineWidth = 4;
-    ctx.strokeRect(ox, oy, WORLD, WORLD);
+    // faint grid for motion reference
+    ctx.strokeStyle = 'rgba(127,234,255,0.05)'; ctx.lineWidth = 1;
+    for (var gx = 0; gx <= WORLD; gx += 200){
+      var sx0 = gx + ox; if (sx0 < -2 || sx0 > canvas.width + 2) continue;
+      ctx.beginPath(); ctx.moveTo(sx0, Math.max(0, oy)); ctx.lineTo(sx0, Math.min(canvas.height, oy + WORLD)); ctx.stroke();
+    }
+    for (var gy = 0; gy <= WORLD; gy += 200){
+      var sy0 = gy + oy; if (sy0 < -2 || sy0 > canvas.height + 2) continue;
+      ctx.beginPath(); ctx.moveTo(Math.max(0, ox), sy0); ctx.lineTo(Math.min(canvas.width, ox + WORLD), sy0); ctx.stroke();
+    }
 
-    // INTERPOLATION: glide every fish toward its latest server position (hides network steps)
+    // bubbles drifting up
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    for (var bi = 0; bi < bubbles.length; bi++){
+      var b = bubbles[bi];
+      b.y -= b.s * dt;
+      if (b.y < 0){ b.y += WORLD; b.x = Math.random()*WORLD; }
+      var bx = b.x + ox, by = b.y + oy;
+      if (bx > -8 && bx < canvas.width + 8 && by > -8 && by < canvas.height + 8){
+        ctx.beginPath(); ctx.arc(bx, by, b.r, 0, Math.PI*2); ctx.fill();
+      }
+    }
+
+    // glowing arena border
+    ctx.strokeStyle = 'rgba(127,234,255,0.16)'; ctx.lineWidth = 10; ctx.strokeRect(ox, oy, WORLD, WORLD);
+    ctx.strokeStyle = 'rgba(127,234,255,0.7)';  ctx.lineWidth = 2.5; ctx.strokeRect(ox, oy, WORLD, WORLD);
+
+    // INTERPOLATION: glide every fish toward its latest server position
     var seen = {}, list = [];
     room.state.players.forEach(function(p, id){
       seen[id] = true;
       var r = renderFish[id];
-      if (!r) r = renderFish[id] = { x: p.x, y: p.y, size: p.size };
+      if (!r) r = renderFish[id] = { x: p.x, y: p.y, size: p.size, ang: 0, phase: Math.random()*6.283, px: p.x, py: p.y };
       if (id === room.sessionId && myPos){ r.x = myPos.x; r.y = myPos.y; }
       else {
         var k = Math.min(1, dt * 10);
         r.x += (p.x - r.x) * k; r.y += (p.y - r.y) * k;
       }
-      r.size += (p.size - r.size) * Math.min(1, dt * 6);   // smooth growth
+      r.size += (p.size - r.size) * Math.min(1, dt * 6);
+      var mvx = r.x - r.px, mvy = r.y - r.py;
+      if (mvx*mvx + mvy*mvy > 0.2) r.ang = Math.atan2(mvy, mvx);
+      r.px = r.x; r.py = r.y;
       list.push([id, p, r]);
     });
     for (var gone in renderFish){ if (!seen[gone]) delete renderFish[gone]; }
 
-    list.sort(function(a, b){ return a[2].size - b[2].size; });
+    list.sort(function(a, b2){ return a[2].size - b2[2].size; });
     list.forEach(function(t3){
       var id = t3[0], p = t3[1], r = t3[2];
       var sx = r.x + ox, sy = r.y + oy;
-      ctx.beginPath(); ctx.arc(sx, sy, r.size, 0, Math.PI*2);
-      ctx.fillStyle = p.color; ctx.fill();
-      if (id === room.sessionId){ ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke(); }
-      ctx.fillStyle = '#e8f6ff'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(p.name, sx, sy - r.size - 6);
+      if (sx < -r.size*2 || sx > canvas.width + r.size*2 || sy < -r.size*2 || sy > canvas.height + r.size*2) return;
+      ctx.save();
+      ctx.translate(sx, sy);
+      drawFishShape(ctx, r.size, r.ang, p.color, id === room.sessionId, now, r.phase);
+      ctx.restore();
+      ctx.fillStyle = '#dff3ff'; ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(p.name, sx, sy - r.size - 10);
     });
 
-    var ranked = list.map(function(pr){ return pr[1]; }).sort(function(a, b){ return b.score - a.score; }).slice(0, 5);
-    var html = '<b>Leaderboard</b><br>';
+    var ranked = list.map(function(pr){ return pr[1]; }).sort(function(a, b3){ return b3.score - a.score; }).slice(0, 5);
+    var html = '<b>LEADERBOARD</b><br>';
     ranked.forEach(function(p){ html += p.name + ': ' + p.score + '<br>'; });
     board.innerHTML = html;
     hud.textContent = list.length + ' fish in the arena — eat smaller ones';
