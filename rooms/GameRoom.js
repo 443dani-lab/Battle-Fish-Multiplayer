@@ -23,9 +23,13 @@ defineTypes(Player, {
 });
 
 class GameState extends Schema {
-  constructor() { super(); this.players = new MapSchema(); }
+  constructor() {
+    super();
+    this.players = new MapSchema();
+    this.online = 0;                 // everyone connected (arena players + menu browsers)
+  }
 }
-defineTypes(GameState, { players: { map: Player } });
+defineTypes(GameState, { players: { map: Player }, online: "number" });
 
 // ---- pure eating logic (exported so it can be unit-tested) ----
 function resolveCollisions(players, world) {
@@ -69,11 +73,21 @@ class GameRoom extends Room {
   }
 
   onJoin(client, options) {
+    this.state.online = this.clients.length;
+    // menu browsers connect for the online count only — they get NO fish in the arena
+    if (options && options.presence) {
+      console.log(`~ presence join (${this.clients.length} connected)`);
+      return;
+    }
     const p = new Player();
     if (options && options.name) p.name = String(options.name).slice(0, 16);
     this.state.players.set(client.sessionId, p);
-    console.log(`+ ${p.name} joined (${this.state.players.size} fish)`);
+    console.log(`+ ${p.name} joined (${this.state.players.size} fish, ${this.state.online} online)`);
   }
-  onLeave(client) { this.state.players.delete(client.sessionId); }
+
+  onLeave(client) {
+    this.state.players.delete(client.sessionId);
+    this.state.online = this.clients.length;
+  }
 }
 module.exports = { GameRoom, resolveCollisions, WORLD, START_SIZE };
