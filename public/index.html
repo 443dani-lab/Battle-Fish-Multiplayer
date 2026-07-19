@@ -28,7 +28,11 @@
   var endpoint = SERVER_URL || ((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
   var client = new Colyseus.Client(endpoint);
   var room = null;
+
   var target = { x: WORLD/2, y: WORLD/2 };
+  var myPos = null;          // client-side PREDICTED position (instant response)
+  var myLastSize = null;     // to detect being eaten (size reset) -> snap to respawn
+  var renderFish = {};       // sessionId -> smoothed {x,y,size} for drawing
 
   (async function(){
     try {
@@ -38,58 +42,92 @@
     } catch (e) { hud.textContent = 'connection failed: ' + e.message; }
   })();
 
+  function myServerFish(){
+    return (room && room.state && room.state.players) ? room.state.players.get(room.sessionId) : null;
+  }
+
   function setTarget(cx, cy){
-    var me = room && room.state && room.state.players && room.state.players.get(room.sessionId);
-    var camX = me ? me.x : WORLD/2, camY = me ? me.y : WORLD/2;
-    var ox = canvas.width/2 - camX, oy = canvas.height/2 - camY;
-    target.x = cx - ox;
-    target.y = cy - oy;
+    var m = myPos || myServerFish();
+    var camX = m ? m.x : WORLD/2, camY = m ? m.y : WORLD/2;
+    target.x = cx - (canvas.width/2 - camX);
+    target.y = cy - (canvas.height/2 - camY);
   }
   canvas.addEventListener('mousemove', function(e){ setTarget(e.clientX, e.clientY); });
   canvas.addEventListener('touchmove', function(e){ e.preventDefault(); var t = e.touches[0]; setTarget(t.clientX, t.clientY); }, {passive:false});
 
-  // move toward the target at a size-based speed; send position ~20x/sec
+  // report our predicted position to the server 20x/sec (server clamps it and owns all eating)
   setInterval(function(){
-    if (!room || !room.state || !room.state.players) return;
-    var me = room.state.players.get(room.sessionId);
-    if (!me) return;
-    var dx = target.x - me.x, dy = target.y - me.y;
-    var d = Math.sqrt(dx*dx + dy*dy) || 1;
-    var speed = Math.max(3, 11 - me.size*0.03);   // bigger fish move slower
-    var step = Math.min(speed, d);
-    room.send('move', { x: me.x + dx/d*step, y: me.y + dy/d*step });
+    if (room && myPos) room.send('move', { x: myPos.x, y: myPos.y });
   }, 50);
 
+  var last = performance.now();
   function draw(){
-    requestAnimationFrame(draw);
+    requestAnimationFrame(draw);           // scheduled first: nothing can kill the loop
+    var now = performance.now();
+    var dt = Math.min(0.05, (now - last) / 1000); last = now;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (room && room.state && room.state.players){
-      var me = room.state.players.get(room.sessionId);
-      var camX = me ? me.x : WORLD/2, camY = me ? me.y : WORLD/2;
-      var ox = canvas.width/2 - camX, oy = canvas.height/2 - camY;
+    if (!(room && room.state && room.state.players)) return;
 
-      ctx.strokeStyle = '#0a4d68'; ctx.lineWidth = 4;
-      ctx.strokeRect(ox, oy, WORLD, WORLD);
+    var sm = myServerFish();
+    if (sm){
+      if (!myPos) myPos = { x: sm.x, y: sm.y };
+      // got eaten? (server reset our size) -> snap to the respawn point
+      if (myLastSize !== null && sm.size < myLastSize - 4){ myPos.x = sm.x; myPos.y = sm.y; }
+      myLastSize = sm.size;
+      // if server and prediction ever diverge badly, trust the server
+      var ex = sm.x - myPos.x, ey = sm.y - myPos.y;
+      if (ex*ex + ey*ey > 250*250){ myPos.x = sm.x; myPos.y = sm.y; }
 
-      var list = [];
-      room.state.players.forEach(function(p, id){ list.push([id, p]); });
-      list.sort(function(a, b){ return a[1].size - b[1].size; });  // big fish drawn on top
-      list.forEach(function(pair){
-        var id = pair[0], p = pair[1];
-        var sx = p.x + ox, sy = p.y + oy;
-        ctx.beginPath(); ctx.arc(sx, sy, p.size, 0, Math.PI*2);
-        ctx.fillStyle = p.color; ctx.fill();
-        if (id === room.sessionId){ ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke(); }
-        ctx.fillStyle = '#e8f6ff'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText(p.name, sx, sy - p.size - 6);
-      });
-
-      var ranked = list.map(function(pr){ return pr[1]; }).sort(function(a, b){ return b.score - a.score; }).slice(0, 5);
-      var html = '<b>Leaderboard</b><br>';
-      ranked.forEach(function(p){ html += p.name + ': ' + p.score + '<br>'; });
-      board.innerHTML = html;
-      hud.textContent = list.length + ' fish in the arena — eat smaller ones';
+      // PREDICTION: move locally toward the cursor every frame — instant response
+      var dx = target.x - myPos.x, dy = target.y - myPos.y;
+      var d = Math.sqrt(dx*dx + dy*dy);
+      if (d > 1){
+        var pps = 20 * Math.max(3, 11 - sm.size * 0.03);   // same speed as before, per second
+        var step = Math.min(pps * dt, d);
+        myPos.x += dx/d * step; myPos.y += dy/d * step;
+      }
+      myPos.x = Math.max(0, Math.min(WORLD, myPos.x));
+      myPos.y = Math.max(0, Math.min(WORLD, myPos.y));
     }
+
+    var camX = myPos ? myPos.x : WORLD/2, camY = myPos ? myPos.y : WORLD/2;
+    var ox = canvas.width/2 - camX, oy = canvas.height/2 - camY;
+
+    ctx.strokeStyle = '#0a4d68'; ctx.lineWidth = 4;
+    ctx.strokeRect(ox, oy, WORLD, WORLD);
+
+    // INTERPOLATION: glide every fish toward its latest server position (hides network steps)
+    var seen = {}, list = [];
+    room.state.players.forEach(function(p, id){
+      seen[id] = true;
+      var r = renderFish[id];
+      if (!r) r = renderFish[id] = { x: p.x, y: p.y, size: p.size };
+      if (id === room.sessionId && myPos){ r.x = myPos.x; r.y = myPos.y; }
+      else {
+        var k = Math.min(1, dt * 10);
+        r.x += (p.x - r.x) * k; r.y += (p.y - r.y) * k;
+      }
+      r.size += (p.size - r.size) * Math.min(1, dt * 6);   // smooth growth
+      list.push([id, p, r]);
+    });
+    for (var gone in renderFish){ if (!seen[gone]) delete renderFish[gone]; }
+
+    list.sort(function(a, b){ return a[2].size - b[2].size; });
+    list.forEach(function(t3){
+      var id = t3[0], p = t3[1], r = t3[2];
+      var sx = r.x + ox, sy = r.y + oy;
+      ctx.beginPath(); ctx.arc(sx, sy, r.size, 0, Math.PI*2);
+      ctx.fillStyle = p.color; ctx.fill();
+      if (id === room.sessionId){ ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke(); }
+      ctx.fillStyle = '#e8f6ff'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(p.name, sx, sy - r.size - 6);
+    });
+
+    var ranked = list.map(function(pr){ return pr[1]; }).sort(function(a, b){ return b.score - a.score; }).slice(0, 5);
+    var html = '<b>Leaderboard</b><br>';
+    ranked.forEach(function(p){ html += p.name + ': ' + p.score + '<br>'; });
+    board.innerHTML = html;
+    hud.textContent = list.length + ' fish in the arena — eat smaller ones';
   }
 </script>
 </body>
