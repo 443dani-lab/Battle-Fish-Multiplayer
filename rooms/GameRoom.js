@@ -1,7 +1,7 @@
 // Authoritative arena: the SERVER owns every fish, pellet, the eating rules — and the bots.
 const { Room } = require("colyseus");
 const { Schema, MapSchema, defineTypes } = require("@colyseus/schema");
-
+ 
 const WORLD = 1600;
 const START_SIZE = 20;
 const MAX_SIZE = 220;
@@ -9,9 +9,10 @@ const MIN_FISH = 8;          // arena never feels emptier than this
 const MAX_BOTS = 12;
 const PELLET_COUNT = 60;     // food dots scattered around
 const PELLET_GROW = 1.2;
-const BOT_SOFT_CAP = 70;     // bots slowly shrink above this so one can't rule forever
+const DECAY_BASE = 26;       // everyone above this slowly shrinks — big fish must hunt or fade
+const DECAY_RATE = 0.0009;   // per tick, proportional to how far above base
 const BOT_NAMES = ["Bubbles","Finn","Chomp","Nibbles","Snapper","Gill","Marlin","Coral","Pike","Moby","Squirt","Fang"];
-
+ 
 class Player extends Schema {
   constructor() {
     super();
@@ -27,7 +28,7 @@ defineTypes(Player, {
   x: "number", y: "number", size: "number",
   name: "string", color: "string", score: "number"
 });
-
+ 
 class Pellet extends Schema {
   constructor() {
     super();
@@ -36,7 +37,7 @@ class Pellet extends Schema {
   }
 }
 defineTypes(Pellet, { x: "number", y: "number" });
-
+ 
 class GameState extends Schema {
   constructor() {
     super();
@@ -46,7 +47,7 @@ class GameState extends Schema {
   }
 }
 defineTypes(GameState, { players: { map: Player }, pellets: { map: Pellet }, online: "number" });
-
+ 
 // ---- pure, unit-testable rules ----
 function resolveCollisions(players, world) {
   const events = [];
@@ -70,7 +71,7 @@ function resolveCollisions(players, world) {
   }
   return events;
 }
-
+ 
 function eatPellets(players, pellets, world) {
   let eaten = 0;
   for (let i = 0; i < players.length; i++) {
@@ -79,7 +80,8 @@ function eatPellets(players, pellets, world) {
       const pe = pellets[j];
       const dx = pl.x - pe.x, dy = pl.y - pe.y;
       if (dx * dx + dy * dy < pl.size * pl.size) {
-        pl.size = Math.min(MAX_SIZE, pl.size + PELLET_GROW);
+        const grow = Math.max(0.3, PELLET_GROW * (START_SIZE / pl.size));
+        pl.size = Math.min(MAX_SIZE, pl.size + grow);
         pl.score = (pl.score || 0) + 1;
         pe.x = Math.random() * world;
         pe.y = Math.random() * world;
@@ -89,27 +91,36 @@ function eatPellets(players, pellets, world) {
   }
   return eaten;
 }
-
+ 
+function applyDecay(players) {
+  for (let i = 0; i < players.length; i++) {
+    const p = players[i];
+    if (p.size > DECAY_BASE) p.size = Math.max(DECAY_BASE, p.size - (p.size - DECAY_BASE) * DECAY_RATE);
+  }
+}
+ 
 class GameRoom extends Room {
   onCreate() {
+    console.log("[BF] GameRoom v5 (balance fix) live");
     this.maxClients = 50;
     this.setState(new GameState());
     this.bots = new Map();           // botId -> brain { tx, ty, repath }
     this.botSeq = 0;
     for (let i = 0; i < PELLET_COUNT; i++) this.state.pellets.set("f" + i, new Pellet());
-
+ 
     this.onMessage("move", (client, data) => {
       const p = this.state.players.get(client.sessionId);
       if (!p) return;
       p.x = Math.max(0, Math.min(WORLD, Number(data.x)));
       p.y = Math.max(0, Math.min(WORLD, Number(data.y)));
     });
-
+ 
     // server game loop ~20x/sec
     this.setSimulationInterval(() => {
       this.updateBots();
       const arr = [], ids = [];
       this.state.players.forEach((p, id) => { arr.push(p); ids.push(id); });
+      applyDecay(arr);
       const pel = [];
       this.state.pellets.forEach((pe) => pel.push(pe));
       eatPellets(arr, pel, WORLD);
@@ -123,7 +134,7 @@ class GameRoom extends Room {
       }
     }, 50);
   }
-
+ 
   addBot() {
     const id = "bot-" + (++this.botSeq);
     const p = new Player();
@@ -132,26 +143,24 @@ class GameRoom extends Room {
     this.state.players.set(id, p);
     this.bots.set(id, { tx: p.x, ty: p.y, repath: 0 });
   }
-
+ 
   removeBot() {
     const id = this.bots.keys().next().value;
     if (!id) return;
     this.bots.delete(id);
     this.state.players.delete(id);
   }
-
+ 
   updateBots() {
     const real = this.state.players.size - this.bots.size;
     const want = Math.max(0, Math.min(MAX_BOTS, MIN_FISH - real));
     while (this.bots.size < want) this.addBot();
     while (this.bots.size > want) this.removeBot();
-
+ 
     const now = Date.now();
     this.bots.forEach((brain, id) => {
       const b = this.state.players.get(id);
       if (!b) { this.bots.delete(id); return; }
-      if (b.size > BOT_SOFT_CAP) b.size = Math.max(BOT_SOFT_CAP, b.size - 0.08);  // gentle decay
-
       let prey = null, preyD = 350, threat = null, threatD = 260;
       this.state.players.forEach((o, oid) => {
         if (oid === id) return;
@@ -160,7 +169,7 @@ class GameRoom extends Room {
         if (b.size > o.size * 1.15 && d < preyD) { prey = o; preyD = d; }
         if (o.size > b.size * 1.15 && d < threatD) { threat = o; threatD = d; }
       });
-
+ 
       let tx, ty;
       if (threat) { tx = b.x + (b.x - threat.x) * 3; ty = b.y + (b.y - threat.y) * 3; }
       else if (prey) { tx = prey.x; ty = prey.y; }
@@ -172,7 +181,7 @@ class GameRoom extends Room {
         }
         tx = brain.tx; ty = brain.ty;
       }
-
+ 
       const dx = tx - b.x, dy = ty - b.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 1;
       const spd = Math.max(3, 11 - b.size * 0.03);
@@ -181,7 +190,7 @@ class GameRoom extends Room {
       b.y = Math.max(0, Math.min(WORLD, b.y + dy / d * step));
     });
   }
-
+ 
   onJoin(client, options) {
     this.state.online = this.clients.length;
     if (options && options.presence) return;       // menu browsers: count only, no fish
@@ -190,10 +199,11 @@ class GameRoom extends Room {
     this.state.players.set(client.sessionId, p);
     console.log(`+ ${p.name} joined (${this.state.players.size} fish, ${this.state.online} online)`);
   }
-
+ 
   onLeave(client) {
     this.state.players.delete(client.sessionId);
     this.state.online = this.clients.length;
   }
 }
-module.exports = { GameRoom, resolveCollisions, eatPellets, WORLD, START_SIZE };
+module.exports = { GameRoom, resolveCollisions, eatPellets, applyDecay, WORLD, START_SIZE };
+ 
