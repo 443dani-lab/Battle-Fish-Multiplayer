@@ -58,6 +58,12 @@
         if (feedLines.length > 4) feedLines.pop();
         feedEl.innerHTML = feedLines.join('<br>');
         if (room && m.victim === room.sessionId) showToast('Eaten by ' + m.eaterName + '!<br><span style="font-size:12px;font-weight:600;color:#f6bcbc">respawning…</span>');
+        if (window.parent !== window && room){
+          try {
+            if (m.eater === room.sessionId) window.parent.postMessage({ type: 'bf-arena', stat: 'kill' }, 'https://battlefishroyale.com');
+            if (m.victim === room.sessionId) window.parent.postMessage({ type: 'bf-arena', stat: 'death' }, 'https://battlefishroyale.com');
+          } catch (e) {}
+        }
       });
       requestAnimationFrame(draw);
     } catch (e) { hud.textContent = 'connection failed: ' + e.message; }
@@ -237,10 +243,13 @@
       if (id === room.sessionId){ ctx.lineWidth = 1.2; ctx.strokeStyle = '#fff'; ctx.stroke(); }
     });
 
-    var html = '<b>LEADERBOARD</b><br>';
-    ranked.slice(0, 5).forEach(function(pr){ html += pr[1].name + ': ' + pr[1].score + '<br>'; });
+    var html = '<b>LEADERBOARD</b> <span style="opacity:.55;font-size:10px">pts · K/D</span><br>';
+    ranked.slice(0, 5).forEach(function(pr){ html += pr[1].name + ' — ' + pr[1].score + ' · ' + (pr[1].kills || 0) + '/' + (pr[1].deaths || 0) + '<br>'; });
     board.innerHTML = html;
-    hud.textContent = list.length + ' fish · eat pellets and smaller fish';
+    var meP = room.state.players.get(room.sessionId);
+    var kd = meP ? (meP.deaths ? (meP.kills / meP.deaths).toFixed(1) : String(meP.kills || 0)) : "0";
+    hud.innerHTML = list.length + " fish \u00b7 eat pellets and smaller fish"
+      + (meP ? "<br><span style=\'color:#aef3ff;font-weight:700\'>\u2694 " + (meP.kills || 0) + " kills \u00b7 " + (meP.deaths || 0) + " deaths \u00b7 K/D " + kd + "</span>" : "");
   }
 </script>
 </body>
