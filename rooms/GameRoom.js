@@ -106,11 +106,22 @@ function applyDecay(players) {
 
 class GameRoom extends Room {
   onCreate() {
-    console.log("[BF] GameRoom v6 (K/D stats) live");
+    console.log("[BF] GameRoom v7 (career stats → cloud) live");
     this.maxClients = 50;
     this.setState(new GameState());
     this.bots = new Map();           // botId -> brain { tx, ty, repath }
     this.botSeq = 0;
+    this.tokens = new Map();          // sessionId -> { token, uid }  (player-supplied Firebase ID token)
+    this.pending = new Map();         // sessionId -> { kills, deaths } awaiting cloud flush
+    this.onMessage("auth", (client, data) => {
+      const token = data && typeof data.token === "string" ? data.token : null;
+      const uid = token ? decodeIdTokenUid(token) : null;
+      if (!uid) return;
+      this.tokens.set(client.sessionId, { token, uid });
+      if (!this.pending.has(client.sessionId)) this.pending.set(client.sessionId, { kills: 0, deaths: 0 });
+      console.log(`[BF] stats tracking on for ${uid.slice(0, 8)}…`);
+    });
+    this.clock.setInterval(() => this.flushAllStats(), 10000);
     for (let i = 0; i < PELLET_COUNT; i++) this.state.pellets.set("f" + i, new Pellet());
 
     this.onMessage("move", (client, data) => {
@@ -132,10 +143,13 @@ class GameRoom extends Room {
       const events = resolveCollisions(arr, WORLD);
       for (let k = 0; k < events.length; k++) {
         const ev = events[k];
+        const eaterId = ids[arr.indexOf(ev.big)], victimId = ids[arr.indexOf(ev.small)];
         this.broadcast("eat", {
-          eater: ids[arr.indexOf(ev.big)],  eaterName: ev.big.name,
-          victim: ids[arr.indexOf(ev.small)], victimName: ev.small.name
+          eater: eaterId,  eaterName: ev.big.name,
+          victim: victimId, victimName: ev.small.name
         });
+        const pk = this.pending.get(eaterId); if (pk && this.tokens.has(eaterId)) pk.kills++;
+        const pd = this.pending.get(victimId); if (pd && this.tokens.has(victimId)) pd.deaths++;
       }
     }, 50);
   }
@@ -206,8 +220,56 @@ class GameRoom extends Room {
   }
 
   onLeave(client) {
+    this.flushStats(client.sessionId);
+    this.tokens.delete(client.sessionId);
+    this.pending.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
     this.state.online = this.clients.length;
   }
+
+  flushAllStats() { this.tokens.forEach((_, sid) => this.flushStats(sid)); }
+
+  flushStats(sid) {
+    const auth = this.tokens.get(sid), pend = this.pending.get(sid);
+    if (!auth || !pend || (pend.kills === 0 && pend.deaths === 0)) return;
+    const k = pend.kills, d = pend.deaths;
+    pend.kills = 0; pend.deaths = 0;
+    statsCommit(auth.uid, auth.token, k, d).catch((e) => {
+      console.warn(`[BF] stat save failed for ${auth.uid.slice(0, 8)}…:`, e && e.message);
+    });
+  }
 }
-module.exports = { GameRoom, resolveCollisions, eatPellets, applyDecay, WORLD, START_SIZE };
+/* ---- career stats -> Firestore (uses the PLAYER'S OWN ID token; owner-only rules still apply) ---- */
+const FIRESTORE_COMMIT = "https://firestore.googleapis.com/v1/projects/battle-fish-royale/databases/(default)/documents:commit";
+function decodeIdTokenUid(token) {
+  try {
+    const part = token.split(".")[1];
+    const json = JSON.parse(Buffer.from(part.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+    return json.user_id || json.sub || null;
+  } catch (e) { return null; }
+}
+function statsCommitBody(uid, kills, deaths) {
+  return {
+    writes: [{
+      transform: {
+        document: `projects/battle-fish-royale/databases/(default)/documents/users/${uid}`,
+        fieldTransforms: [
+          { fieldPath: "srvKills",  increment: { integerValue: String(kills) } },
+          { fieldPath: "srvDeaths", increment: { integerValue: String(deaths) } },
+          { fieldPath: "statsAt",   setToServerValue: "REQUEST_TIME" }
+        ]
+      }
+    }]
+  };
+}
+async function statsCommit(uid, token, kills, deaths) {
+  if (typeof fetch !== "function") throw new Error("global fetch unavailable (need Node 18+)");
+  const res = await fetch(FIRESTORE_COMMIT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+    body: JSON.stringify(statsCommitBody(uid, kills, deaths))
+  });
+  if (!res.ok) throw new Error("HTTP " + res.status + " " + (await res.text()).slice(0, 120));
+}
+
+module.exports = { GameRoom, resolveCollisions, eatPellets, applyDecay, WORLD, START_SIZE, decodeIdTokenUid, statsCommitBody, statsCommit };
