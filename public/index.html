@@ -36,6 +36,15 @@
   var endpoint = SERVER_URL || ((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
   var client = new Colyseus.Client(endpoint);
   var room = null;
+  var pendingToken = null;
+  window.addEventListener('message', function (e) {
+    if (e.origin !== 'https://battlefishroyale.com') return;
+    var d = e.data;
+    if (d && d.type === 'bf-auth' && typeof d.token === 'string'){
+      pendingToken = d.token;
+      if (room) { try { room.send('auth', { token: pendingToken }); } catch (err) {} }
+    }
+  });
 
   var target = { x: WORLD/2, y: WORLD/2 };
   var myPos = null, myLastSize = null;
@@ -52,6 +61,7 @@
   (async function(){
     try {
       room = await client.joinOrCreate('battle', { name: myName });
+      if (pendingToken) { try { room.send('auth', { token: pendingToken }); } catch (err) {} }
       hud.textContent = 'move your mouse — eat pellets and smaller fish';
       room.onMessage('eat', function (m) {
         feedLines.unshift(m.eaterName + ' ate ' + m.victimName);
