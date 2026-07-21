@@ -1,40 +1,53 @@
-// Battle Fish arena — v9 LOCK & SHOOT (2026-07-21).
-// Matches the main game's fire model:
-//   PRIMARY  = lock & shoot. The server auto-locks every live fish onto its
-//              nearest live opponent within LOCK_RANGE and auto-fires while
-//              locked and off cooldown. No fire button, no client aim.
-//   SPECIAL  = tap-to-fire (🚀). Client sends 'special'; server aims it at the
-//              current lock target (or facing direction if none), bigger damage,
-//              long cooldown. This mirrors the main game's spwbtn side weapons.
+// Battle Fish arena — v10 FULL LOADOUT (2026-07-21).
+// The arena now carries the main game's starter loadout so skills transfer 1:1:
+//   PRIMARY  = lock & shoot (server auto-locks nearest live opponent within
+//              LOCK_RANGE and auto-fires — no button, exactly like the game).
+//   SPECIAL  = 🚀 tap-fire side weapon (aims at lock target). 55 dmg, 3s cd.
+//   GRENADE  = 💣 tap-drop depth grenade. 1.1s fuse → 150px blast, 70 dmg,
+//              OWNER IMMUNE (matches the game's player-immune depth grenade).
+//   TRAIL    = ☠️ poison trail. Tap → lays toxic segments behind you for 4s;
+//              each segment lives 7s (main-game buff duration) and deals DoT
+//              to enemies crossing it. You are immune to your own trail.
 //
-// K/D pipeline preserved from v7/v8: kills broadcast 'eat' with
-// { eater, eaterName, victim, victimName }; pending tally per tokened session;
-// Firestore INCREMENT flush every 10s + onLeave using the player's own Bearer
-// token. Game-side needs zero changes.
+// Kill credit is unified: projectile, grenade, and poison kills all route
+// through the same onKill → broadcast('eat', {eater, eaterName, victim,
+// victimName}) → pending tally → Firestore INCREMENT flush. The whole K/D
+// pipeline (v7) is untouched; the game side needs zero changes.
 
 const { Room } = require("colyseus");
 const { Schema, MapSchema, defineTypes } = require("@colyseus/schema");
 const https = require("https");
 
 const WORLD          = 1600;
-const FISH_SIZE      = 34;      // fixed — no growth
+const FISH_SIZE      = 34;
 const FISH_HP        = 100;
-const MOVE_SPEED     = 220;     // px/sec
-const LOCK_RANGE     = 420;     // auto-lock + auto-fire radius
-const FIRE_CD        = 0.35;    // primary cooldown (auto-fire cadence)
+const MOVE_SPEED     = 220;
+const LOCK_RANGE     = 420;
+const FIRE_CD        = 0.35;
 const SHOT_SPEED     = 520;
 const SHOT_DMG       = 22;      // 5 primary hits to kill
 const SHOT_TTL       = 1.5;
-const SHOT_R         = 3;       // primary projectile radius (added to fish radius on hit test)
-const SPECIAL_CD     = 3.0;     // tap-fire side weapon
+const SHOT_R         = 3;
+const SPECIAL_CD     = 3.0;
 const SPECIAL_DMG    = 55;
 const SPECIAL_SPEED  = 460;
 const SPECIAL_TTL    = 1.8;
 const SPECIAL_R      = 9;
+const GRENADE_CD     = 6.0;     // 💣 tool cooldown
+const GRENADE_FUSE   = 1.1;     // seconds until detonation
+const GRENADE_R      = 150;     // blast radius
+const GRENADE_DMG    = 70;      // kills anything ≤70 hp
+const TRAIL_CD       = 9.0;     // ☠️ tool cooldown
+const TRAIL_ACTIVE   = 4.0;     // seconds of laying after activation
+const TRAIL_DROP     = 0.09;    // seconds between segments while laying
+const TRAIL_SEG_TTL  = 7.0;     // segment lifetime (main-game 7s buff)
+const TRAIL_SEG_R    = 18;      // segment radius
+const POISON_DPS     = 14;      // DoT while standing in a segment
 const RESPAWN_DELAY  = 2.5;
 const MIN_FISH       = 8;
 const MAX_BOTS       = 12;
-const BOT_SPECIAL_RANGE = 260;  // bots consider a special inside this range
+const BOT_SPECIAL_RANGE = 260;
+const BOT_GRENADE_RANGE = 170;
 const BOT_NAMES = [
   "Bubbles","Finn","Chomp","Nibbles","Snapper","Gill",
   "Marlin","Coral","Pike","Moby","Squirt","Fang"
@@ -66,10 +79,13 @@ class Player extends Schema {
     this.deaths    = 0;
     this.hp        = FISH_HP;
     this.maxHp     = FISH_HP;
-    this.ang       = 0;         // facing (server points it at the lock target while locked)
-    this.fireCd    = 0;         // primary auto-fire cooldown
-    this.specialCd = 0;         // 🚀 side-weapon cooldown (synced so the client button can show it)
-    this.lockId    = "";        // sessionId of the current lock target ("" = none) — client draws the reticle from this
+    this.ang       = 0;
+    this.fireCd    = 0;
+    this.specialCd = 0;
+    this.grenadeCd = 0;         // 💣 synced so the client slot shows the countdown
+    this.trailCd   = 0;         // ☠️ synced cooldown
+    this.trailT    = 0;         // ☠️ seconds of active laying remaining (synced → button glow)
+    this.lockId    = "";
     this.respawnT  = 0;
   }
 }
@@ -78,7 +94,9 @@ defineTypes(Player, {
   name: "string", color: "string", score: "number",
   kills: "number", deaths: "number",
   hp: "number", maxHp: "number", ang: "number",
-  fireCd: "number", specialCd: "number", lockId: "string", respawnT: "number"
+  fireCd: "number", specialCd: "number", grenadeCd: "number",
+  trailCd: "number", trailT: "number",
+  lockId: "string", respawnT: "number"
 });
 
 class Projectile extends Schema {
@@ -97,17 +115,41 @@ defineTypes(Projectile, {
   owner: "string", ttl: "number", kind: "string", r: "number"
 });
 
+class Grenade extends Schema {
+  constructor() {
+    super();
+    this.x = 0; this.y = 0;
+    this.fuse = GRENADE_FUSE;
+    this.owner = "";
+  }
+}
+defineTypes(Grenade, { x: "number", y: "number", fuse: "number", owner: "string" });
+
+class TrailSeg extends Schema {
+  constructor() {
+    super();
+    this.x = 0; this.y = 0;
+    this.ttl = TRAIL_SEG_TTL;
+    this.owner = "";
+  }
+}
+defineTypes(TrailSeg, { x: "number", y: "number", ttl: "number", owner: "string" });
+
 class GameState extends Schema {
   constructor() {
     super();
     this.players     = new MapSchema();
     this.projectiles = new MapSchema();
+    this.grenades    = new MapSchema();
+    this.trails      = new MapSchema();
     this.online      = 0;
   }
 }
 defineTypes(GameState, {
   players:     { map: Player },
   projectiles: { map: Projectile },
+  grenades:    { map: Grenade },
+  trails:      { map: TrailSeg },
   online:      "number"
 });
 
@@ -118,14 +160,30 @@ function respawnPlayer(p) {
   p.y = Math.random() * WORLD;
   p.fireCd = 0;
   p.specialCd = 0;
+  p.grenadeCd = 0;
+  p.trailCd = 0;
+  p.trailT = 0;
   p.lockId = "";
   p.respawnT = 0;
+}
+
+// Shared lethal-hit bookkeeping: any damage source that zeroes a fish routes
+// through here so projectile / grenade / poison kills are indistinguishable to
+// the K/D pipeline.
+function applyLethal(state, victim, victimId, ownerId, emitKill) {
+  victim.respawnT = RESPAWN_DELAY;
+  victim.deaths = (victim.deaths || 0) + 1;
+  const killer = state.players.get(ownerId);
+  if (killer) killer.kills = (killer.kills || 0) + 1;
+  emitKill(ownerId, victimId);
 }
 
 function tickPlayers(state, dt) {
   state.players.forEach((p) => {
     if (p.fireCd > 0)    p.fireCd    = Math.max(0, p.fireCd - dt);
     if (p.specialCd > 0) p.specialCd = Math.max(0, p.specialCd - dt);
+    if (p.grenadeCd > 0) p.grenadeCd = Math.max(0, p.grenadeCd - dt);
+    if (p.trailCd > 0)   p.trailCd   = Math.max(0, p.trailCd - dt);
     if (p.hp <= 0 && p.respawnT > 0) {
       p.respawnT = Math.max(0, p.respawnT - dt);
       if (p.respawnT <= 0) respawnPlayer(p);
@@ -133,10 +191,21 @@ function tickPlayers(state, dt) {
   });
 }
 
-// LOCK & SHOOT core: every live fish locks its nearest live opponent within
-// LOCK_RANGE (lockId synced to clients for the reticle), faces it, and — while
-// off cooldown — fire(id, p, ang) is invoked to spawn a primary shot.
-// The caller's fire callback owns spawning + resetting fireCd.
+// ☠️ While trailT > 0, lay a segment at the fish's position every TRAIL_DROP s.
+// lay(ownerId, x, y) is supplied by the room (it owns the id sequence).
+function tickTrailLay(state, dt, lay) {
+  state.players.forEach((p, id) => {
+    if (p.hp <= 0) { p.trailT = 0; return; }
+    if (p.trailT <= 0) return;
+    p.trailT = Math.max(0, p.trailT - dt);
+    p._trailAcc = (p._trailAcc || 0) + dt;
+    while (p._trailAcc >= TRAIL_DROP) {
+      p._trailAcc -= TRAIL_DROP;
+      lay(id, p.x, p.y);
+    }
+  });
+}
+
 function tickAutoFire(state, fire) {
   state.players.forEach((p, id) => {
     if (p.hp <= 0) { p.lockId = ""; return; }
@@ -169,7 +238,7 @@ function tickProjectiles(state, dt, emitKill) {
     state.players.forEach((pl, plId) => {
       if (consumed) return;
       if (plId === pr.owner) return;
-      if (pl.hp <= 0) return;                          // dead fish phase through
+      if (pl.hp <= 0) return;
       const dx = pl.x - pr.x, dy = pl.y - pr.y;
       const rr = pl.size + (pr.r || 0);
       if (dx * dx + dy * dy < rr * rr) {
@@ -177,29 +246,75 @@ function tickProjectiles(state, dt, emitKill) {
         pl.hp = Math.max(0, pl.hp - dmg);
         consumed = true;
         toRemove.push(id);
-        if (pl.hp <= 0) {
-          pl.respawnT = RESPAWN_DELAY;
-          pl.deaths = (pl.deaths || 0) + 1;
-          const shooter = state.players.get(pr.owner);
-          if (shooter) shooter.kills = (shooter.kills || 0) + 1;
-          emitKill(pr.owner, plId);
-        }
+        if (pl.hp <= 0) applyLethal(state, pl, plId, pr.owner, emitKill);
       }
     });
   });
   toRemove.forEach((id) => state.projectiles.delete(id));
 }
 
+// 💣 fuse countdown → area blast. Owner immune. onBoom(x, y, r) lets the room
+// broadcast a detonation cue for the client's explosion ring.
+function tickGrenades(state, dt, onBoom, emitKill) {
+  const toRemove = [];
+  state.grenades.forEach((g, id) => {
+    g.fuse -= dt;
+    if (g.fuse > 0) return;
+    toRemove.push(id);
+    onBoom(g.x, g.y, GRENADE_R);
+    state.players.forEach((pl, plId) => {
+      if (plId === g.owner) return;                       // player immune to own grenade
+      if (pl.hp <= 0) return;
+      const dx = pl.x - g.x, dy = pl.y - g.y;
+      if (dx * dx + dy * dy < GRENADE_R * GRENADE_R) {
+        pl.hp = Math.max(0, pl.hp - GRENADE_DMG);
+        if (pl.hp <= 0) applyLethal(state, pl, plId, g.owner, emitKill);
+      }
+    });
+  });
+  toRemove.forEach((id) => state.grenades.delete(id));
+}
+
+// ☠️ segments age out; enemies inside take POISON_DPS. Owner immune. Poison
+// kills credit the trail's owner through the same pipeline.
+// NO STACKING: adjacent segments overlap by design (laid every 0.09s), so a
+// fish standing in the trail is inside 2-3 segments at once — damage is capped
+// at ONE dose per player per tick or the trail would be 2-3× more lethal than
+// the stated POISON_DPS.
+function tickTrails(state, dt, emitKill) {
+  const toRemove = [];
+  const dosed = {};                                       // plId -> already poisoned this tick
+  state.trails.forEach((t, id) => {
+    t.ttl -= dt;
+    if (t.ttl <= 0) { toRemove.push(id); return; }
+    state.players.forEach((pl, plId) => {
+      if (dosed[plId]) return;                            // one dose per tick, no overlap stacking
+      if (plId === t.owner) return;                       // immune to own trail
+      if (pl.hp <= 0) return;
+      const dx = pl.x - t.x, dy = pl.y - t.y;
+      const rr = TRAIL_SEG_R + pl.size * 0.4;
+      if (dx * dx + dy * dy < rr * rr) {
+        dosed[plId] = true;
+        pl.hp = Math.max(0, pl.hp - POISON_DPS * dt);
+        if (pl.hp <= 0) applyLethal(state, pl, plId, t.owner, emitKill);
+      }
+    });
+  });
+  toRemove.forEach((id) => state.trails.delete(id));
+}
+
 class GameRoom extends Room {
   onCreate() {
-    console.log("[BF] GameRoom v9 (LOCK & SHOOT) live");
+    console.log("[BF] GameRoom v10 (FULL LOADOUT) live");
     this.maxClients = 50;
     this.setState(new GameState());
     this.bots    = new Map();
     this.botSeq  = 0;
     this.projSeq = 0;
-    this.tokens  = new Map();      // sessionId -> { token, uid }
-    this.pending = new Map();      // sessionId -> { kills, deaths }
+    this.grenSeq = 0;
+    this.trailSeq = 0;
+    this.tokens  = new Map();
+    this.pending = new Map();
 
     this.onMessage("auth", (client, data) => {
       const token = data && typeof data.token === "string" ? data.token : null;
@@ -210,9 +325,6 @@ class GameRoom extends Room {
       console.log(`[BF] stats tracking on for ${uid.slice(0, 8)}…`);
     });
 
-    // Movement is client-authoritative (server clamps). ang is the client's
-    // travel direction — used as the special's fallback aim when unlocked;
-    // the auto-fire loop overrides ang to face the lock target while locked.
     this.onMessage("move", (client, data) => {
       const p = this.state.players.get(client.sessionId);
       if (!p || p.hp <= 0) return;
@@ -221,13 +333,27 @@ class GameRoom extends Room {
       if (typeof data.ang === "number" && !p.lockId) p.ang = data.ang;
     });
 
-    // 🚀 SPECIAL — the only click/tap-fired weapon. Aims at the lock target if
-    // one exists (like the main game's side weapons firing at the locked enemy),
-    // otherwise fires straight ahead. Server owns cooldown + damage.
+    // 🚀 special — tap-fire, aims at the lock target
     this.onMessage("special", (client) => {
       const p = this.state.players.get(client.sessionId);
       if (!p || p.hp <= 0 || p.specialCd > 0) return;
       this.fireSpecial(client.sessionId, p);
+    });
+
+    // 💣 grenade — tap-drop at the fish's position, fuse then blast
+    this.onMessage("grenade", (client) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p || p.hp <= 0 || p.grenadeCd > 0) return;
+      this.dropGrenade(client.sessionId, p);
+    });
+
+    // ☠️ trail — tap to start laying poison behind you for TRAIL_ACTIVE seconds
+    this.onMessage("trail", (client) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p || p.hp <= 0 || p.trailCd > 0) return;
+      p.trailT = TRAIL_ACTIVE;
+      p.trailCd = TRAIL_CD;
+      p._trailAcc = 0;
     });
 
     this.clock.setInterval(() => this.flushAllStats(), 10000);
@@ -236,11 +362,15 @@ class GameRoom extends Room {
     this.setSimulationInterval(() => {
       this.updateBots(dt);
       tickPlayers(this.state, dt);
-      tickAutoFire(this.state, (id, p, ang) => {         // ← lock & shoot: everyone auto-fires
+      tickTrailLay(this.state, dt, (id, x, y) => this.layTrailSeg(id, x, y));
+      tickAutoFire(this.state, (id, p, ang) => {
         this.spawnShot(id, p, ang, "p");
         p.fireCd = FIRE_CD;
       });
-      tickProjectiles(this.state, dt, (eaterId, victimId) => this.onKill(eaterId, victimId));
+      tickProjectiles(this.state, dt, (e, v) => this.onKill(e, v));
+      tickGrenades(this.state, dt, (x, y, r) => this.broadcast("boom", { x, y, r }),
+                   (e, v) => this.onKill(e, v));
+      tickTrails(this.state, dt, (e, v) => this.onKill(e, v));
     }, 50);
   }
 
@@ -260,7 +390,6 @@ class GameRoom extends Room {
   }
 
   fireSpecial(sessionId, p) {
-    // Aim: lock target first (side weapons fire at the locked enemy), facing otherwise.
     let ang = p.ang;
     if (p.lockId) {
       const t = this.state.players.get(p.lockId);
@@ -270,12 +399,31 @@ class GameRoom extends Room {
     p.specialCd = SPECIAL_CD;
   }
 
+  dropGrenade(sessionId, p) {
+    const id = "g" + (++this.grenSeq);
+    const g = new Grenade();
+    g.x = p.x; g.y = p.y;
+    g.fuse = GRENADE_FUSE;
+    g.owner = sessionId;
+    this.state.grenades.set(id, g);
+    p.grenadeCd = GRENADE_CD;
+  }
+
+  layTrailSeg(ownerId, x, y) {
+    const id = "t" + (++this.trailSeq);
+    const t = new TrailSeg();
+    t.x = x; t.y = y;
+    t.ttl = TRAIL_SEG_TTL;
+    t.owner = ownerId;
+    this.state.trails.set(id, t);
+  }
+
   onKill(eaterId, victimId) {
     const pk = this.pending.get(eaterId); if (pk && this.tokens.has(eaterId)) pk.kills++;
     const pd = this.pending.get(victimId); if (pd && this.tokens.has(victimId)) pd.deaths++;
     const shooter = this.state.players.get(eaterId);
     const victim = this.state.players.get(victimId);
-    this.broadcast("eat", {                       // name kept for game-listener compat
+    this.broadcast("eat", {
       eater: eaterId,   eaterName: shooter ? shooter.name : "?",
       victim: victimId, victimName: victim ? victim.name : "?"
     });
@@ -296,9 +444,6 @@ class GameRoom extends Room {
     this.state.players.delete(id);
   }
 
-  // Bots only need to MOVE — the universal lock & shoot loop fires their
-  // primaries exactly like it does for humans. They kite around their lock
-  // target and occasionally throw a special when close.
   updateBots(dt) {
     const real = this.state.players.size - this.bots.size;
     const want = Math.max(0, Math.min(MAX_BOTS, MIN_FISH - real));
@@ -318,11 +463,20 @@ class GameRoom extends Room {
         const d = Math.sqrt(dx * dx + dy * dy) || 1;
         if (d < BOT_SPECIAL_RANGE && b.specialCd <= 0 && Math.random() < 0.03) {
           this.fireSpecial(id, b);
-          b.specialCd = SPECIAL_CD + 2 + Math.random() * 2;   // bots slower on specials than humans
+          b.specialCd = SPECIAL_CD + 2 + Math.random() * 2;
         }
-        if (d > 280)      { tx = target.x;      ty = target.y; }        // close in
-        else if (d < 160) { tx = b.x - dx;      ty = b.y - dy; }        // back off
-        else              { tx = b.x + dy * .6; ty = b.y - dx * .6; }   // strafe
+        if (d < BOT_GRENADE_RANGE && b.grenadeCd <= 0 && Math.random() < 0.02) {
+          this.dropGrenade(id, b);
+          b.grenadeCd = GRENADE_CD + 2 + Math.random() * 3;
+        }
+        if (d < 320 && b.trailCd <= 0 && Math.random() < 0.008) {
+          b.trailT = TRAIL_ACTIVE;
+          b.trailCd = TRAIL_CD + 3;
+          b._trailAcc = 0;
+        }
+        if (d > 280)      { tx = target.x;      ty = target.y; }
+        else if (d < 160) { tx = b.x - dx;      ty = b.y - dy; }
+        else              { tx = b.x + dy * .6; ty = b.y - dx * .6; }
       } else {
         if (now > brain.repath || (Math.abs(brain.tx - b.x) < 30 && Math.abs(brain.ty - b.y) < 30)) {
           brain.tx = Math.random() * WORLD;
