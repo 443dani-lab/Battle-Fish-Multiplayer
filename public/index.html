@@ -1,266 +1,361 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Battle Fish — Arena</title>
-<style>
-  html,body{margin:0;height:100%;background:#02101e;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}
-  #title{position:fixed;top:8px;left:50%;transform:translateX(-50%);color:#7feaff;font-size:14px;font-weight:800;letter-spacing:3px;text-shadow:0 0 12px rgba(127,234,255,.5);pointer-events:none}
-  #hud{position:fixed;top:8px;left:8px;color:#7feaff;font-size:13px;background:rgba(2,16,30,.55);padding:5px 10px;border-radius:8px;pointer-events:none}
-  #feed{position:fixed;top:40px;left:8px;color:#bfe0f2;font-size:11px;line-height:1.6;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,.6)}
-  #board{position:fixed;top:8px;right:8px;color:#cfe9ff;font-size:12px;line-height:1.55;background:rgba(2,16,30,.55);padding:7px 12px;border-radius:8px;min-width:130px;pointer-events:none;border:1px solid rgba(127,234,255,.25)}
-  #board b{color:#7feaff;letter-spacing:1px}
-  #toast{position:fixed;top:38%;left:50%;transform:translate(-50%,-50%);color:#ffd9d9;font-size:20px;font-weight:800;letter-spacing:1px;background:rgba(40,4,10,.72);border:1px solid rgba(255,120,120,.5);padding:14px 26px;border-radius:14px;display:none;pointer-events:none;text-align:center}
-  canvas{display:block;touch-action:none}
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+  <title>Battle Fish — Arena</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin:0; padding:0; height:100%; background:#02101e; overflow:hidden; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:#e8f6ff; touch-action:none; }
+    #hud { position:fixed; top:10px; left:50%; transform:translateX(-50%); font-weight:800; letter-spacing:1px; background:rgba(2,16,30,.7); border:1px solid rgba(127,234,255,.3); padding:6px 12px; border-radius:8px; font-size:13px; z-index:5; text-align:center; }
+    #leaderboard { position:fixed; top:10px; right:10px; background:rgba(2,16,30,.75); border:1px solid rgba(127,234,255,.3); padding:8px 12px; border-radius:8px; font:600 12px/1.5 system-ui; min-width:180px; z-index:5; }
+    #feed { position:fixed; bottom:12px; right:12px; background:rgba(2,16,30,.7); border:1px solid rgba(127,234,255,.25); padding:6px 10px; border-radius:8px; font:600 11px/1.6 system-ui; min-width:180px; max-width:280px; text-align:right; z-index:5; }
+    #toast { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(2,16,30,.9); border:1px solid rgba(255,120,120,.55); padding:14px 22px; border-radius:12px; font:800 15px/1.4 system-ui; text-align:center; box-shadow:0 0 26px rgba(255,120,120,.25); display:none; z-index:6; }
+    #spbtn { position:fixed; right:20px; bottom:64px; width:86px; height:86px; border-radius:50%; border:2px solid rgba(255,190,120,.75); background:radial-gradient(circle at 35% 30%, #f4a960, #7a3d15); color:#fffbe6; font:900 26px/1 system-ui; cursor:pointer; z-index:7; box-shadow:0 0 22px rgba(255,150,60,.35); user-select:none; -webkit-user-select:none; touch-action:none; }
+    #spbtn:active { transform:scale(.94); }
+    #spbtn.dis { opacity:.4; }
+    #spcd { display:block; font:800 12px/1 system-ui; margin-top:4px; letter-spacing:1px; min-height:12px; }
+    #hint { position:fixed; bottom:20px; left:20px; font:600 11px/1.4 system-ui; color:#8fd0e8; background:rgba(2,16,30,.6); padding:6px 10px; border-radius:6px; z-index:5; opacity:.85; }
+    canvas { display:block; width:100vw; height:100vh; }
+  </style>
 </head>
 <body>
-<div id="title">BATTLE FISH — ARENA</div>
-<div id="hud">connecting…</div>
-<div id="feed"></div>
-<div id="board"></div>
-<div id="toast"></div>
-<canvas id="c"></canvas>
-<script src="/lib/colyseus.js"></script>
-<script>
-  var WORLD = 1600;
-  var canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
-  var hud = document.getElementById('hud'), board = document.getElementById('board');
-  var feedEl = document.getElementById('feed'), toastEl = document.getElementById('toast');
-  var bgGrad = null;
-  function resize(){ canvas.width = window.innerWidth; canvas.height = window.innerHeight; bgGrad = null; }
-  resize(); window.addEventListener('resize', resize);
+  <canvas id="c"></canvas>
+  <div id="hud">connecting…</div>
+  <div id="leaderboard">connecting…</div>
+  <div id="feed"></div>
+  <div id="toast"></div>
+  <button id="spbtn" title="SPECIAL — tap to fire">🚀<span id="spcd"></span></button>
+  <div id="hint">move: mouse / drag · auto-locks &amp; fires nearest enemy · 🚀 / Space = special</div>
 
-  var SERVER_URL = "";
-  var endpoint = SERVER_URL || ((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
-  var client = new Colyseus.Client(endpoint);
-  var room = null;
-  var pendingToken = null;
-  window.addEventListener('message', function (e) {
-    if (e.origin !== 'https://battlefishroyale.com') return;
-    var d = e.data;
-    if (d && d.type === 'bf-auth' && typeof d.token === 'string'){
-      pendingToken = d.token;
-      if (room) { try { room.send('auth', { token: pendingToken }); } catch (err) {} }
+  <!-- Colyseus SDK — same-origin bundled, unpkg fallback -->
+  <script src="/lib/colyseus.js"></script>
+  <script>
+  (function(){
+    'use strict';
+
+    // ---------- world constants (must match server) ----------
+    var WORLD = 1600;
+    var canvas = document.getElementById('c');
+    var ctx    = canvas.getContext('2d');
+    var hud    = document.getElementById('hud');
+    var lbEl   = document.getElementById('leaderboard');
+    var feedEl = document.getElementById('feed');
+    var toastEl= document.getElementById('toast');
+    var spBtn  = document.getElementById('spbtn');
+    var spCdEl = document.getElementById('spcd');
+    var feedLines = [];
+    var toastTimer = null;
+
+    function resize(){ canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize); resize();
+
+    var params = new URLSearchParams(location.search);
+    var myName = (params.get('name') || 'You').slice(0, 16);
+
+    // ---------- auth token relay: parent → arena → server ----------
+    var pendingToken = null;
+    window.addEventListener('message', function(ev){
+      var d = ev.data;
+      if (d && d.type === 'bf-auth' && typeof d.token === 'string'){
+        pendingToken = d.token;
+        if (room) { try { room.send('auth', { token: pendingToken }); } catch (err) {} }
+      }
+    });
+
+    // ---------- movement input ----------
+    var target = { x: WORLD/2, y: WORLD/2 };   // world-space movement destination
+
+    function screenToWorld(cx, cy){
+      var mp = myServerFish();
+      if (!mp) return { x: WORLD/2, y: WORLD/2 };
+      return { x: mp.x + (cx - canvas.width/2), y: mp.y + (cy - canvas.height/2) };
     }
-  });
+    function setTargetFromScreen(cx, cy){
+      var w = screenToWorld(cx, cy);
+      target.x = w.x; target.y = w.y;
+    }
+    canvas.addEventListener('mousemove', function(e){ setTargetFromScreen(e.clientX, e.clientY); });
+    canvas.addEventListener('click',     function(e){ setTargetFromScreen(e.clientX, e.clientY); });   // click = move here (NOT fire)
+    canvas.addEventListener('touchmove', function(e){
+      if (!e.touches[0]) return;
+      setTargetFromScreen(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: true });
+    canvas.addEventListener('touchstart', function(e){
+      if (!e.touches[0]) return;
+      setTargetFromScreen(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: true });
 
-  var target = { x: WORLD/2, y: WORLD/2 };
-  var myPos = null, myLastSize = null;
-  var renderFish = {};
-  var feedLines = [], toastTimer = null;
+    // ---------- SPECIAL — the only tap-to-fire weapon ----------
+    function trySpecial(){
+      if (!room) return;
+      var mp = myServerFish();
+      if (!mp || mp.hp <= 0 || mp.specialCd > 0) return;   // server enforces too — this just avoids wasted sends
+      try { room.send('special'); } catch (err) {}
+    }
+    function bindSpecial(el){
+      el.addEventListener('pointerdown', function(e){ e.preventDefault(); trySpecial(); });
+      el.addEventListener('click', function(e){ e.preventDefault(); trySpecial(); });
+    }
+    bindSpecial(spBtn);
+    window.addEventListener('keydown', function(e){ if (e.code === 'Space'){ e.preventDefault(); trySpecial(); } });
 
-  var qName = null;
-  try { qName = new URLSearchParams(location.search).get('name'); } catch (e) {}
-  var myName = (qName || ('Fish ' + Math.floor(Math.random()*1000))).slice(0, 16);
+    // ---------- Colyseus connect ----------
+    var CS = window.Colyseus;
+    if (!CS){
+      var sc = document.createElement('script');
+      sc.src = 'https://unpkg.com/colyseus.js@0.16.22/dist/colyseus.js';
+      sc.onload = start;
+      sc.onerror = function(){ hud.textContent = 'SDK failed to load'; };
+      document.head.appendChild(sc);
+    } else start();
 
-  var bubbles = [];
-  for (var i = 0; i < 45; i++) bubbles.push({ x: Math.random()*WORLD, y: Math.random()*WORLD, r: 1.5 + Math.random()*4, s: 8 + Math.random()*22 });
+    var room = null;
 
-  (async function(){
-    try {
-      room = await client.joinOrCreate('battle', { name: myName });
-      if (pendingToken) { try { room.send('auth', { token: pendingToken }); } catch (err) {} }
-      hud.textContent = 'move your mouse — eat pellets and smaller fish';
-      room.onMessage('eat', function (m) {
-        feedLines.unshift(m.eaterName + ' ate ' + m.victimName);
-        if (feedLines.length > 4) feedLines.pop();
-        feedEl.innerHTML = feedLines.join('<br>');
-        if (room && m.victim === room.sessionId) showToast('Eaten by ' + m.eaterName + '!<br><span style="font-size:12px;font-weight:600;color:#f6bcbc">respawning…</span>');
-        if (window.parent !== window && room){
-          try {
-            if (m.eater === room.sessionId) window.parent.postMessage({ type: 'bf-arena', stat: 'kill' }, 'https://battlefishroyale.com');
-            if (m.victim === room.sessionId) window.parent.postMessage({ type: 'bf-arena', stat: 'death' }, 'https://battlefishroyale.com');
-          } catch (e) {}
+    function start(){
+      if (!window.Colyseus){ hud.textContent = 'SDK failed to load'; return; }
+      var client = new window.Colyseus.Client('wss://play.battlefishroyale.com');
+      (async function(){
+        try {
+          room = await client.joinOrCreate('battle', { name: myName });
+          if (pendingToken){ try { room.send('auth', { token: pendingToken }); } catch (e) {} }
+          hud.textContent = 'auto-locks the nearest enemy · 🚀 = special';
+          room.onMessage('eat', function(m){
+            // kept as 'eat' for backward-compat with the game-side postMessage listener
+            feedLines.unshift(m.eaterName + ' killed ' + m.victimName);
+            if (feedLines.length > 4) feedLines.pop();
+            feedEl.innerHTML = feedLines.join('<br>');
+            if (room && m.victim === room.sessionId){
+              showToast('Killed by ' + m.eaterName + '!<br><span style="font-size:12px;font-weight:600;color:#f6bcbc">respawning…</span>');
+            }
+            if (window.parent !== window && room){
+              try {
+                if (m.eater  === room.sessionId) window.parent.postMessage({ type:'bf-arena', stat:'kill'  }, 'https://battlefishroyale.com');
+                if (m.victim === room.sessionId) window.parent.postMessage({ type:'bf-arena', stat:'death' }, 'https://battlefishroyale.com');
+              } catch (e) {}
+            }
+          });
+          requestAnimationFrame(draw);
+        } catch (e) {
+          hud.textContent = 'connection failed: ' + (e && e.message);
+        }
+      })();
+    }
+
+    function showToast(html){
+      toastEl.innerHTML = html;
+      toastEl.style.display = 'block';
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(function(){ toastEl.style.display = 'none'; }, 2200);
+    }
+
+    function myServerFish(){
+      return (room && room.state && room.state.players) ? room.state.players.get(room.sessionId) : null;
+    }
+
+    // ---------- movement send loop (30 Hz) ----------
+    setInterval(function(){
+      if (!room) return;
+      var mp = myServerFish();
+      if (!mp || mp.hp <= 0) return;
+      var dx = target.x - mp.x, dy = target.y - mp.y;
+      var d  = Math.sqrt(dx*dx + dy*dy) || 1;
+      var speed = 220;                   // must be <= server MOVE_SPEED
+      var step  = Math.min(speed * (1/30), d);
+      var nx    = mp.x + dx/d * step;
+      var ny    = mp.y + dy/d * step;
+      var ang   = Math.atan2(dy, dx);    // travel direction — special fallback aim when unlocked
+      mp.x = Math.max(0, Math.min(WORLD, nx));    // client-side prediction; server snaps next tick
+      mp.y = Math.max(0, Math.min(WORLD, ny));
+      try { room.send('move', { x: mp.x, y: mp.y, ang: ang }); } catch (e) {}
+    }, 1000/30);
+
+    // ---------- rendering ----------
+    var lastTs = performance.now();
+    function draw(){
+      requestAnimationFrame(draw);
+      var now = performance.now();
+      lastTs = now;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!room || !room.state) return;
+      var mp = myServerFish();
+      var camX = mp ? mp.x : WORLD/2;
+      var camY = mp ? mp.y : WORLD/2;
+      var offX = canvas.width/2 - camX;
+      var offY = canvas.height/2 - camY;
+
+      // subtle grid
+      ctx.strokeStyle = 'rgba(90,180,220,.08)';
+      ctx.lineWidth = 1;
+      var GRID = 100;
+      var x0 = Math.floor((camX - canvas.width/2) / GRID) * GRID;
+      var x1 = Math.ceil ((camX + canvas.width/2) / GRID) * GRID;
+      var y0 = Math.floor((camY - canvas.height/2) / GRID) * GRID;
+      var y1 = Math.ceil ((camY + canvas.height/2) / GRID) * GRID;
+      ctx.beginPath();
+      for (var gx = x0; gx <= x1; gx += GRID){ ctx.moveTo(gx + offX, y0 + offY); ctx.lineTo(gx + offX, y1 + offY); }
+      for (var gy = y0; gy <= y1; gy += GRID){ ctx.moveTo(x0 + offX, gy + offY); ctx.lineTo(x1 + offX, gy + offY); }
+      ctx.stroke();
+
+      // world boundary
+      ctx.strokeStyle = 'rgba(127,234,255,.35)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(offX, offY, WORLD, WORLD);
+
+      // LOCK reticle — pulsing ring + link line on MY current lock target
+      if (mp && mp.hp > 0 && mp.lockId && room.state.players){
+        var lockP = room.state.players.get(mp.lockId);
+        if (lockP && lockP.hp > 0){
+          var lsx = lockP.x + offX, lsy = lockP.y + offY;
+          var msx = mp.x + offX,   msy = mp.y + offY;
+          var pulse = 1 + 0.12 * Math.sin(now * 0.008);
+          ctx.strokeStyle = 'rgba(255,120,120,.35)';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 6]);
+          ctx.beginPath(); ctx.moveTo(msx, msy); ctx.lineTo(lsx, lsy); ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.strokeStyle = 'rgba(255,120,120,.85)';
+          ctx.lineWidth = 2.5;
+          var rr = (lockP.size + 10) * pulse;
+          ctx.beginPath(); ctx.arc(lsx, lsy, rr, 0, Math.PI*2); ctx.stroke();
+          // corner ticks
+          ctx.beginPath();
+          [[1,0],[0,1],[-1,0],[0,-1]].forEach(function(v){
+            ctx.moveTo(lsx + v[0]*rr, lsy + v[1]*rr);
+            ctx.lineTo(lsx + v[0]*(rr+7), lsy + v[1]*(rr+7));
+          });
+          ctx.stroke();
+        }
+      }
+
+      // projectiles — primary small pale bolt, special big orange rocket-glow
+      if (room.state.projectiles){
+        room.state.projectiles.forEach(function(pr){
+          var sx = pr.x + offX, sy = pr.y + offY;
+          if (sx < -30 || sx > canvas.width + 30 || sy < -30 || sy > canvas.height + 30) return;
+          var isSp = pr.kind === 's';
+          var trailT = isSp ? 0.07 : 0.04;
+          var tx = sx - pr.vx * trailT, ty = sy - pr.vy * trailT;
+          var grad = ctx.createLinearGradient(tx, ty, sx, sy);
+          if (isSp){
+            grad.addColorStop(0, 'rgba(255,150,60,0)');
+            grad.addColorStop(1, 'rgba(255,150,60,.95)');
+          } else {
+            grad.addColorStop(0, 'rgba(255,220,140,0)');
+            grad.addColorStop(1, 'rgba(255,220,140,.9)');
+          }
+          ctx.strokeStyle = grad;
+          ctx.lineWidth = isSp ? 7 : 4;
+          ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(sx, sy); ctx.stroke();
+          ctx.fillStyle = isSp ? '#ffd9a8' : '#fff2c8';
+          ctx.beginPath(); ctx.arc(sx, sy, isSp ? 6.5 : 3.5, 0, Math.PI*2); ctx.fill();
+          if (isSp){
+            ctx.strokeStyle = 'rgba(255,170,80,.5)';
+            ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(sx, sy, 11, 0, Math.PI*2); ctx.stroke();
+          }
+        });
+      }
+
+      // players
+      var ranked = [];
+      room.state.players.forEach(function(p, id){
+        ranked.push([id, p]);
+        var sx = p.x + offX, sy = p.y + offY;
+        if (sx < -60 || sx > canvas.width + 60 || sy < -60 || sy > canvas.height + 60) return;
+        var isMe = (room && id === room.sessionId);
+        drawFish(ctx, sx, sy, p.size, p.ang || 0, p.color, isMe, p.hp <= 0, now);
+        ctx.fillStyle = p.hp <= 0 ? 'rgba(255,120,120,.6)' : '#fff';
+        ctx.font = '600 12px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(p.name || 'Fish', sx, sy - p.size - 14);
+        if (p.hp > 0){
+          var bw = 44, bh = 5;
+          var bx = sx - bw/2, by = sy - p.size - 10;
+          ctx.fillStyle = 'rgba(0,0,0,.55)';
+          ctx.fillRect(bx - 1, by - 1, bw + 2, bh + 2);
+          var frac = Math.max(0, Math.min(1, p.hp / (p.maxHp || 100)));
+          ctx.fillStyle = frac > 0.5 ? '#7cf59a' : (frac > 0.25 ? '#ffcc66' : '#ff7676');
+          ctx.fillRect(bx, by, bw * frac, bh);
+        }
+        if (p.hp <= 0){
+          ctx.fillStyle = 'rgba(255,120,120,.8)';
+          ctx.font = '700 10px system-ui';
+          ctx.fillText('respawning ' + p.respawnT.toFixed(1) + 's', sx, sy + p.size + 16);
         }
       });
-      requestAnimationFrame(draw);
-    } catch (e) { hud.textContent = 'connection failed: ' + e.message; }
-  })();
 
-  function showToast(html){
-    toastEl.innerHTML = html;
-    toastEl.style.display = 'block';
-    if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(function(){ toastEl.style.display = 'none'; }, 2200);
-  }
-
-  function myServerFish(){
-    return (room && room.state && room.state.players) ? room.state.players.get(room.sessionId) : null;
-  }
-
-  function setTarget(cx, cy){
-    var m = myPos || myServerFish();
-    var camX = m ? m.x : WORLD/2, camY = m ? m.y : WORLD/2;
-    target.x = cx - (canvas.width/2 - camX);
-    target.y = cy - (canvas.height/2 - camY);
-  }
-  canvas.addEventListener('mousemove', function(e){ setTarget(e.clientX, e.clientY); });
-  canvas.addEventListener('touchmove', function(e){ e.preventDefault(); var t = e.touches[0]; setTarget(t.clientX, t.clientY); }, {passive:false});
-
-  setInterval(function(){
-    if (room && myPos) room.send('move', { x: myPos.x, y: myPos.y });
-  }, 50);
-
-  function drawFishShape(g, size, ang, color, isMe, now, phase){
-    g.rotate(ang);
-    var wag = Math.sin(now*0.012 + phase) * size * 0.28;
-    g.beginPath();
-    g.moveTo(-size*0.7, 0);
-    g.lineTo(-size*1.4, -size*0.5 + wag);
-    g.lineTo(-size*1.4,  size*0.5 + wag);
-    g.closePath();
-    g.globalAlpha = 0.85; g.fillStyle = color; g.fill(); g.globalAlpha = 1;
-    g.beginPath();
-    g.moveTo(-size*0.15, -size*0.5);
-    g.lineTo(size*0.22, -size*0.95);
-    g.lineTo(size*0.45, -size*0.45);
-    g.closePath();
-    g.globalAlpha = 0.9; g.fillStyle = color; g.fill(); g.globalAlpha = 1;
-    g.beginPath();
-    g.ellipse(0, 0, size, size*0.62, 0, 0, Math.PI*2);
-    g.fillStyle = color; g.fill();
-    g.beginPath();
-    g.ellipse(size*0.05, size*0.2, size*0.78, size*0.34, 0, 0, Math.PI*2);
-    g.fillStyle = 'rgba(255,255,255,0.13)'; g.fill();
-    g.beginPath(); g.arc(size*0.52, -size*0.16, Math.max(2, size*0.14), 0, Math.PI*2);
-    g.fillStyle = '#eaf7ff'; g.fill();
-    g.beginPath(); g.arc(size*0.57, -size*0.16, Math.max(1, size*0.07), 0, Math.PI*2);
-    g.fillStyle = '#0b1c2a'; g.fill();
-    if (isMe){
-      g.beginPath(); g.ellipse(0, 0, size + 3, size*0.62 + 3, 0, 0, Math.PI*2);
-      g.lineWidth = 2.5; g.strokeStyle = 'rgba(255,255,255,0.9)'; g.stroke();
-    }
-  }
-
-  var last = performance.now();
-  function draw(){
-    requestAnimationFrame(draw);
-    var now = performance.now();
-    var dt = Math.min(0.05, (now - last) / 1000); last = now;
-
-    if (!bgGrad){
-      bgGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
-      bgGrad.addColorStop(0, '#0b3552');
-      bgGrad.addColorStop(1, '#02101e');
-    }
-    ctx.fillStyle = bgGrad;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    if (!(room && room.state && room.state.players)) return;
-
-    var sm = myServerFish();
-    if (sm){
-      if (!myPos) myPos = { x: sm.x, y: sm.y };
-      if (myLastSize !== null && sm.size < myLastSize - 4){ myPos.x = sm.x; myPos.y = sm.y; }
-      myLastSize = sm.size;
-      var ex = sm.x - myPos.x, ey = sm.y - myPos.y;
-      if (ex*ex + ey*ey > 250*250){ myPos.x = sm.x; myPos.y = sm.y; }
-      var dx = target.x - myPos.x, dy = target.y - myPos.y;
-      var d = Math.sqrt(dx*dx + dy*dy);
-      if (d > 1){
-        var pps = 20 * Math.max(3, 11 - sm.size * 0.03);
-        var step = Math.min(pps * dt, d);
-        myPos.x += dx/d * step; myPos.y += dy/d * step;
-      }
-      myPos.x = Math.max(0, Math.min(WORLD, myPos.x));
-      myPos.y = Math.max(0, Math.min(WORLD, myPos.y));
-    }
-
-    var camX = myPos ? myPos.x : WORLD/2, camY = myPos ? myPos.y : WORLD/2;
-    var ox = canvas.width/2 - camX, oy = canvas.height/2 - camY;
-
-    ctx.strokeStyle = 'rgba(127,234,255,0.05)'; ctx.lineWidth = 1;
-    for (var gx = 0; gx <= WORLD; gx += 200){
-      var sx0 = gx + ox; if (sx0 < -2 || sx0 > canvas.width + 2) continue;
-      ctx.beginPath(); ctx.moveTo(sx0, Math.max(0, oy)); ctx.lineTo(sx0, Math.min(canvas.height, oy + WORLD)); ctx.stroke();
-    }
-    for (var gy = 0; gy <= WORLD; gy += 200){
-      var sy0 = gy + oy; if (sy0 < -2 || sy0 > canvas.height + 2) continue;
-      ctx.beginPath(); ctx.moveTo(Math.max(0, ox), sy0); ctx.lineTo(Math.min(canvas.width, ox + WORLD), sy0); ctx.stroke();
-    }
-
-    ctx.fillStyle = 'rgba(255,255,255,0.10)';
-    for (var bi = 0; bi < bubbles.length; bi++){
-      var b = bubbles[bi];
-      b.y -= b.s * dt;
-      if (b.y < 0){ b.y += WORLD; b.x = Math.random()*WORLD; }
-      var bx = b.x + ox, by = b.y + oy;
-      if (bx > -8 && bx < canvas.width + 8 && by > -8 && by < canvas.height + 8){
-        ctx.beginPath(); ctx.arc(bx, by, b.r, 0, Math.PI*2); ctx.fill();
-      }
-    }
-
-    // food pellets — glowing dots
-    if (room.state.pellets){
-      room.state.pellets.forEach(function(pe){
-        var px = pe.x + ox, py = pe.y + oy;
-        if (px < -10 || px > canvas.width + 10 || py < -10 || py > canvas.height + 10) return;
-        ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI*2);
-        ctx.fillStyle = 'rgba(127,234,255,0.25)'; ctx.fill();
-        ctx.beginPath(); ctx.arc(px, py, 2.6, 0, Math.PI*2);
-        ctx.fillStyle = '#aef3ff'; ctx.fill();
+      // minimap
+      var mm = 130, mmX = 12, mmY = canvas.height - mm - 12;
+      ctx.fillStyle = 'rgba(2,16,30,.65)';
+      ctx.strokeStyle = 'rgba(127,234,255,.3)';
+      ctx.fillRect(mmX, mmY, mm, mm);
+      ctx.strokeRect(mmX, mmY, mm, mm);
+      var sc = mm / WORLD;
+      room.state.players.forEach(function(p, id){
+        if (p.hp <= 0) return;
+        ctx.fillStyle = (id === room.sessionId) ? '#7feaff' : '#8fd0e8';
+        ctx.beginPath();
+        ctx.arc(mmX + p.x*sc, mmY + p.y*sc, id === room.sessionId ? 3.5 : 2.2, 0, Math.PI*2);
+        ctx.fill();
+        if (id === room.sessionId){ ctx.lineWidth = 1.2; ctx.strokeStyle = '#fff'; ctx.stroke(); }
       });
+
+      // leaderboard (ranked by K then D)
+      ranked.sort(function(a, b){ return (b[1].kills - a[1].kills) || (a[1].deaths - b[1].deaths); });
+      var lbHtml = '<b>LEADERBOARD</b> <span style="opacity:.55;font-size:10px">K / D</span><br>';
+      ranked.slice(0, 5).forEach(function(pr){
+        var p = pr[1];
+        var mark = (room && pr[0] === room.sessionId) ? ' ▶' : '';
+        lbHtml += p.name + mark + ' — ' + (p.kills || 0) + ' / ' + (p.deaths || 0) + '<br>';
+      });
+      var meP = myServerFish();
+      if (meP){
+        var kd = meP.deaths ? (meP.kills / meP.deaths).toFixed(1) : String(meP.kills || 0);
+        lbHtml += '<br><span style="color:#aef3ff;font-weight:700">' +
+                  '⚔ ' + (meP.kills || 0) + ' kills · ' + (meP.deaths || 0) + ' deaths · K/D ' + kd + '</span>' +
+                  '<br><span style="color:' + (meP.hp > 50 ? '#7cf59a' : meP.hp > 25 ? '#ffcc66' : '#ff7676') + ';font-weight:700">' +
+                  '♥ HP ' + Math.round(meP.hp) + ' / ' + (meP.maxHp || 100) + '</span>';
+      }
+      lbEl.innerHTML = lbHtml;
+
+      // 🚀 button — server-synced cooldown display
+      var spReady = (meP && meP.hp > 0 && meP.specialCd <= 0);
+      spBtn.classList.toggle('dis', !spReady);
+      spCdEl.textContent = (meP && meP.specialCd > 0) ? meP.specialCd.toFixed(1) : '';
     }
 
-    ctx.strokeStyle = 'rgba(127,234,255,0.16)'; ctx.lineWidth = 10; ctx.strokeRect(ox, oy, WORLD, WORLD);
-    ctx.strokeStyle = 'rgba(127,234,255,0.7)';  ctx.lineWidth = 2.5; ctx.strokeRect(ox, oy, WORLD, WORLD);
-
-    var seen = {}, list = [];
-    room.state.players.forEach(function(p, id){
-      seen[id] = true;
-      var r = renderFish[id];
-      if (!r) r = renderFish[id] = { x: p.x, y: p.y, size: p.size, ang: 0, phase: Math.random()*6.283, px: p.x, py: p.y };
-      if (id === room.sessionId && myPos){ r.x = myPos.x; r.y = myPos.y; }
-      else {
-        var k = Math.min(1, dt * 10);
-        r.x += (p.x - r.x) * k; r.y += (p.y - r.y) * k;
-      }
-      r.size += (p.size - r.size) * Math.min(1, dt * 6);
-      var mvx = r.x - r.px, mvy = r.y - r.py;
-      if (mvx*mvx + mvy*mvy > 0.2) r.ang = Math.atan2(mvy, mvx);
-      r.px = r.x; r.py = r.y;
-      list.push([id, p, r]);
-    });
-    for (var gone in renderFish){ if (!seen[gone]) delete renderFish[gone]; }
-
-    // leaderboard + crown holder
-    var ranked = list.slice().sort(function(a, b3){ return b3[1].score - a[1].score; });
-    var topId = (ranked.length && ranked[0][1].score > 0) ? ranked[0][0] : null;
-
-    list.sort(function(a, b2){ return a[2].size - b2[2].size; });
-    list.forEach(function(t3){
-      var id = t3[0], p = t3[1], r = t3[2];
-      var sx = r.x + ox, sy = r.y + oy;
-      if (sx < -r.size*2 || sx > canvas.width + r.size*2 || sy < -r.size*2 || sy > canvas.height + r.size*2) return;
+    // Fish silhouette — oriented body + tail wag, coloured by player
+    function drawFish(ctx, sx, sy, size, ang, color, isMe, dead, now){
       ctx.save();
       ctx.translate(sx, sy);
-      drawFishShape(ctx, r.size, r.ang, p.color, id === room.sessionId, now, r.phase);
+      ctx.rotate(ang);
+      ctx.globalAlpha = dead ? 0.35 : 1;
+      ctx.fillStyle = color || '#7feaff';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, size, size * 0.62, 0, 0, Math.PI*2);
+      ctx.fill();
+      var wag = Math.sin(now * 0.012) * size * 0.18;
+      ctx.beginPath();
+      ctx.moveTo(-size * 0.85, 0);
+      ctx.lineTo(-size * 1.35, -size * 0.55 + wag);
+      ctx.lineTo(-size * 1.35,  size * 0.55 + wag);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(size * 0.45, -size * 0.18, size * 0.14, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#111';
+      ctx.beginPath(); ctx.arc(size * 0.5, -size * 0.18, size * 0.07, 0, Math.PI*2); ctx.fill();
+      if (isMe && !dead){
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath(); ctx.ellipse(0, 0, size + 2, size * 0.62 + 2, 0, 0, Math.PI*2); ctx.stroke();
+      }
       ctx.restore();
-      ctx.fillStyle = '#dff3ff'; ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(p.name, sx, sy - r.size - 10);
-      if (id === topId){ ctx.font = '16px system-ui, sans-serif'; ctx.fillText('👑', sx, sy - r.size - 26); }
-    });
-
-    // minimap (bottom-right)
-    var MM = 140, mmX = canvas.width - MM - 12, mmY = canvas.height - MM - 12, sc = MM / WORLD;
-    ctx.fillStyle = 'rgba(2,16,30,0.55)'; ctx.fillRect(mmX, mmY, MM, MM);
-    ctx.strokeStyle = 'rgba(127,234,255,0.4)'; ctx.lineWidth = 1; ctx.strokeRect(mmX, mmY, MM, MM);
-    list.forEach(function(t4){
-      var id = t4[0], p = t4[1];
-      ctx.beginPath(); ctx.arc(mmX + p.x*sc, mmY + p.y*sc, id === room.sessionId ? 3.5 : 2.2, 0, Math.PI*2);
-      ctx.fillStyle = p.color; ctx.fill();
-      if (id === room.sessionId){ ctx.lineWidth = 1.2; ctx.strokeStyle = '#fff'; ctx.stroke(); }
-    });
-
-    var html = '<b>LEADERBOARD</b> <span style="opacity:.55;font-size:10px">pts · K/D</span><br>';
-    ranked.slice(0, 5).forEach(function(pr){ html += pr[1].name + ' — ' + pr[1].score + ' · ' + (pr[1].kills || 0) + '/' + (pr[1].deaths || 0) + '<br>'; });
-    board.innerHTML = html;
-    var meP = room.state.players.get(room.sessionId);
-    var kd = meP ? (meP.deaths ? (meP.kills / meP.deaths).toFixed(1) : String(meP.kills || 0)) : "0";
-    hud.innerHTML = list.length + " fish \u00b7 eat pellets and smaller fish"
-      + (meP ? "<br><span style=\'color:#aef3ff;font-weight:700\'>\u2694 " + (meP.kills || 0) + " kills \u00b7 " + (meP.deaths || 0) + " deaths \u00b7 K/D " + kd + "</span>" : "");
-  }
-</script>
+    }
+  })();
+  </script>
 </body>
 </html>
