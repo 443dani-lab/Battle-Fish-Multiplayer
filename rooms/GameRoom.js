@@ -70,6 +70,7 @@ class Player extends Schema {
     this.maxHp  = 100;
     this.match  = "";        // "" = Open Waters; otherwise the Royale match id this fish swims in
     this.wpn    = "";        // equipped weapon id — purely visual, lets other screens replicate the LOOK of your fire
+    this.mass   = 0;         // the fish's SIZE — every screen shows you as big as you really are
     this.fireSeq = 0;        // increments every shot — other screens replay it as harmless light
     this.aim    = 0;         // the angle those shots went
     this.alive  = true;
@@ -83,7 +84,8 @@ defineTypes(Player, {
   hp: "number", maxHp: "number", alive: "boolean",
   kills: "number", deaths: "number",
   match: "string",
-  wpn: "string", fireSeq: "number", aim: "number"
+  wpn: "string", fireSeq: "number", aim: "number",
+  mass: "number"
 });
 
 class GameState extends Schema {
@@ -114,7 +116,7 @@ function meterDamage(meter, amount, nowS) {
 
 class GameRoom extends Room {
   onCreate() {
-    console.log("[BF] GameRoom v13 (SHARED OCEAN + LIVE FIRE RELAY) live");
+    console.log("[BF] GameRoom v14 (SHARED OCEAN + SIZE SYNC) live");
     this.maxClients = 150;                                 // per-OCEAN cap — joinOrCreate auto-spawns ocean #2, #3… when full
     this.setState(new GameState());
     this.tokens  = new Map();   // sessionId -> { token, uid }   (Firestore stat flushes)
@@ -146,6 +148,7 @@ class GameRoom extends Room {
       p.alive = true;
       p.match = (data && typeof data.match === "string") ? data.match.slice(0, MATCH_MAX) : "";
       p.wpn = (data && typeof data.wpn === "string") ? data.wpn.slice(0, 24) : "";
+      if (data && typeof data.mass === "number" && isFinite(data.mass)) p.mass = Math.max(1, Math.min(100000, data.mass));
       if (!this.pending.has(client.sessionId)) this.pending.set(client.sessionId, { kills: 0, deaths: 0 });
     });
 
@@ -186,6 +189,7 @@ class GameRoom extends Room {
         if (fs > p.fireSeq && fs - p.fireSeq < 1000) p.fireSeq = fs;
       }
       if (typeof data.aim === "number" && isFinite(data.aim)) p.aim = Math.max(-7, Math.min(7, data.aim));
+      if (typeof data.mass === "number" && isFinite(data.mass)) p.mass = Math.max(1, Math.min(100000, data.mass));
     });
 
     // Attacker's game reports damage it dealt to another REAL player.
