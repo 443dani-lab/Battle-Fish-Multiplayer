@@ -69,6 +69,9 @@ class Player extends Schema {
     this.hp     = 100;       // mirrored from the owner's client (their game owns their hp)
     this.maxHp  = 100;
     this.match  = "";        // "" = Open Waters; otherwise the Royale match id this fish swims in
+    this.wpn    = "";        // equipped weapon id — purely visual, lets other screens replicate the LOOK of your fire
+    this.fireSeq = 0;        // increments every shot — other screens replay it as harmless light
+    this.aim    = 0;         // the angle those shots went
     this.alive  = true;
     this.kills  = 0;
     this.deaths = 0;
@@ -79,7 +82,8 @@ defineTypes(Player, {
   name: "string", char: "string",
   hp: "number", maxHp: "number", alive: "boolean",
   kills: "number", deaths: "number",
-  match: "string"
+  match: "string",
+  wpn: "string", fireSeq: "number", aim: "number"
 });
 
 class GameState extends Schema {
@@ -110,7 +114,7 @@ function meterDamage(meter, amount, nowS) {
 
 class GameRoom extends Room {
   onCreate() {
-    console.log("[BF] GameRoom v12 (SHARED OCEAN + ROYALE MATCHMAKING) live");
+    console.log("[BF] GameRoom v13 (SHARED OCEAN + LIVE FIRE RELAY) live");
     this.maxClients = 60;
     this.setState(new GameState());
     this.tokens  = new Map();   // sessionId -> { token, uid }   (Firestore stat flushes)
@@ -141,6 +145,7 @@ class GameRoom extends Room {
       if (y !== null) p.y = y;
       p.alive = true;
       p.match = (data && typeof data.match === "string") ? data.match.slice(0, MATCH_MAX) : "";
+      p.wpn = (data && typeof data.wpn === "string") ? data.wpn.slice(0, 24) : "";
       if (!this.pending.has(client.sessionId)) this.pending.set(client.sessionId, { kills: 0, deaths: 0 });
     });
 
@@ -176,6 +181,11 @@ class GameRoom extends Room {
       if (typeof data.hp === "number" && isFinite(data.hp)) p.hp = Math.max(0, data.hp);
       if (typeof data.maxHp === "number" && isFinite(data.maxHp) && data.maxHp > 0) p.maxHp = data.maxHp;
       if (typeof data.alive === "boolean") p.alive = data.alive;
+      if (typeof data.fireSeq === "number" && isFinite(data.fireSeq)){       // fire events: monotonic, never backwards, sane rate cap
+        const fs = Math.floor(data.fireSeq);
+        if (fs > p.fireSeq && fs - p.fireSeq < 1000) p.fireSeq = fs;
+      }
+      if (typeof data.aim === "number" && isFinite(data.aim)) p.aim = Math.max(-7, Math.min(7, data.aim));
     });
 
     // Attacker's game reports damage it dealt to another REAL player.
