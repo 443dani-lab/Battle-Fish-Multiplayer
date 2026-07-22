@@ -115,7 +115,7 @@ function meterDamage(meter, amount, nowS) {
 class GameRoom extends Room {
   onCreate() {
     console.log("[BF] GameRoom v13 (SHARED OCEAN + LIVE FIRE RELAY) live");
-    this.maxClients = 60;
+    this.maxClients = 150;                                 // per-OCEAN cap — joinOrCreate auto-spawns ocean #2, #3… when full
     this.setState(new GameState());
     this.tokens  = new Map();   // sessionId -> { token, uid }   (Firestore stat flushes)
     this.pending = new Map();   // sessionId -> { kills, deaths } awaiting flush
