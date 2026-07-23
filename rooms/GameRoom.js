@@ -1,4 +1,5 @@
-// Battle Fish — GameRoom v12 SHARED OCEAN + ROYALE MATCHMAKING (2026-07-21).
+// Battle Fish — GameRoom v14 SHARED OCEAN + SIZE SYNC (2026-07-23).
+// (v13 added live-fire relay: wpn/fireSeq/aim · v14 added mass on the wire.)
 //
 // v12 adds real Battle Royale: players who queue within the same window are
 // bundled into one match ticket {matchId, startAt, roster}. Every fish carries
